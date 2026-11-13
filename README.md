@@ -1,244 +1,283 @@
-# AIナカワリ（MMD-AINakawari）
+# AI中割（MMD-AINakawari）中文说明
 
-English: [README.en.md](README.en.md)
+> **关于中文版**：本仓库已汉化 —— 界面、日志、安装设置全中文，并兼容
+> 「MMDZh 汉化的 MMD 9.32 x64」（前提是 exe 本体未被修改）。
+> 中文改动共 12 个文件 + 1 个已编译的 DLL + 一键部署 bat，见 `zh_补丁包\`
+> （部署方法：把补丁包放到 `MikuMikuDance.exe` 同目录，双击「一键部署中文版.bat」）。
+> 2026-11-13 第二版 DLL 修复：重开工程后右下角面板偶尔变黑块、需鼠标划过才恢复的问题。
 
-MMD（MikuMikuDance）・MMM（MikuMikuMoving）で打ったキーとキーの間を、AI が中割りして埋めるツールです。
-タイムラインでキーを選んで「生成」を押すだけ。間のフレームのキーが、タイムラインにそのまま入ります。
+English: [README_en.md](README_en.md) ／ 日文原版: [README_Jap.md](README_Jap.md)
 
-![MMD の右下の簡易操作パネル](docs/images/panel_in_mmd.png)
+MMD（MikuMikuDance）和 MMM（MikuMikuMoving）里打好的关键帧与关键帧之间的空隙，由 AI 自动补间（中割り）填满。
+只需在时间线上选中关键帧，按「生成」。中间帧的关键帧会直接写进时间线。
 
-中の動きを作るのは、NVIDIA の 2 つのモデルです。
+![MMD 右下角的简易操作面板](docs/images/panel_in_mmd.png)
 
-- **Kimodo**: 英語の文（プロンプト）から動きを作る。打ったキーのポーズを通りながら、「踊る」「手を振る」などの動きで間を埋める
-- **MotionBricks**: プロンプト無しで、キーからキーへの自然な中割りを作る
+内部生成动作的是 NVIDIA 的两个模型：
 
-| 生成の前（30・60・90F にキー） | 生成の後（30〜90F を作り直した） |
+- **Kimodo**：根据英文句子（提示词）生成动作。在经过你打的关键帧姿势的同时，用「跳舞」「挥手」等动作填满空隙
+- **MotionBricks**：不需要提示词，生成关键帧到关键帧之间的自然补间
+
+| 生成前（在 30・60・90F 打了关键帧） | 生成后（重做了 30〜90F） |
 |---|---|
-| ![生成の前](docs/images/timeline_before.png) | ![生成の後](docs/images/timeline_after.png) |
+| ![生成前](docs/images/timeline_before.png) | ![生成后](docs/images/timeline_after.png) |
 
 > [!NOTE]
-> 本プロジェクトは NVIDIA とは関係のない個人の制作物です。
+> 本项目是与 NVIDIA 无关的个人作品。
 
-## できること
+## 能做什么
 
 | | 内容 |
 |---|---|
-| **AI 中割り（MotionBricks）** | プロンプト無しで、キーとキーの間（17〜57 フレーム）をつなぐ。キーごとに止まる／勢いのまま通る、手首だけ普通の補間、を選べる |
-| **プロンプトで作る（Kimodo）** | 英語の文で動きを指定して、キーの間を埋める。区間ごとに違う文も書ける（`run / 45: stop` なら 45F から stop）。詳細の窓では、最後のキーの後ろに続きを足すことや、プロンプトだけで作ることもできる |
-| **サンプルのプロンプト** | 英語が苦手でも、「前へ歩く：A person walks forward.」のような一覧から選べる（7 種類・44 個） |
-| **選んだキーの間だけ作り直す** | タイムラインで選んだキーの最初から最後までを作り直す。範囲の外の動きは補間曲線ごと保ち、範囲の端は外の動きにつながる |
-| **キー以外の手がかり**（Kimodo） | 全ての親だけのキーは「腰がそこを通る」目印、足 IK・腕 IK だけのキーは「手足がそこに来る」目印になる（MotionBricks の中割りでは使わない） |
-| **なめらかに止まる** | 最後のキーでぴたっと止まらず、MotionBricks で自然に減速して止まる |
-| **歩いた分を全ての親に**（Kimodo） | プロンプトで歩かせた分の移動・向きを全ての親に載せる。センターには歩きの揺れだけ残るので、後から全ての親を動かす・回すだけで、歩く場所や向きを変えられる |
-| **元に戻す** | 生成の前のモーションに 1 回で戻す |
-| **生成の中断** | 生成中は「生成」のボタンが「中断」に変わる。押すと作るのをやめ、キーは押す前のまま残る |
+| **AI 补间（MotionBricks）** | 不用提示词，连接关键帧之间（17〜57 帧）的空隙。可选「每个关键帧都停一下／保持惯性通过」「只有手腕用普通补间」 |
+| **用提示词生成（Kimodo）** | 用英文句子指定动作，填充关键帧之间。每段可以写不同的句子（`run / 45: stop` 表示 45F 开始 stop）。详细窗口里还能「续写」（在最后一个关键帧后面加动作）或「仅用提示词生成」 |
+| **示例提示词** | 不擅长英语也能从「向前走：A person walks forward.」这样的列表里选（7 类・44 条，中文版里分类和动作名已翻成中文，英文句子保留） |
+| **只重做选中的关键帧之间** | 从时间线上选中的第一个到最后一个关键帧为止重做。范围外的动作连同补间曲线一起保留，范围两端与外部动作自然衔接 |
+| **关键帧以外的线索**（Kimodo） | 只有「全亲」的关键帧当作「腰经过此处」的标记；只有脚 IK・腕 IK 的关键帧当作「手脚到达此处」的标记（MotionBricks 补间不使用） |
+| **平滑停止** | 最后一个关键帧不会戛然而止，由 MotionBricks 自然减速停下 |
+| **把走出的位移放到全亲**（Kimodo） | 把提示词让模型走出的移动量・转向量放到「全亲」的关键帧上，中心骨只留下走路的晃动。之后只动全亲就能改变走的位置和朝向 |
+| **撤销** | 一次回到生成前的动作 |
+| **中断生成** | 生成中「生成」按钮会变成「中断」。按下即停止生成，关键帧保持按下前的状态 |
 
-## 動く環境
+## 运行环境
 
-| | 必要なもの | 確かめた環境・いただいた報告 |
+| | 需要什么 | 已验证的环境与用户报告 |
 |---|---|---|
 | OS | Windows 10／11（64bit） | Windows 11 |
-| ソフト | MikuMikuDance 9.32 x64（日本語版。英語モードでも可）か、MikuMikuMoving 1.2.9.2（64bit・おまけ・試験版） | MMD 9.32 x64・MMM 1.2.9.2 |
-| GPU | NVIDIA の GTX 16 シリーズ／RTX 20 シリーズ以降。ドライバは新しい物に。それ以外の GPU は下の「GPU の方式」 | RTX 3090（24GB）。GTX 1650（4GB）でも動いたと報告をいただきました |
-| ランタイム | [Microsoft Visual C++ 再頒布可能パッケージ（x64）](https://aka.ms/vs/17/release/vc_redist.x64.exe)。入っていなければ、セットアップがここへ案内します | |
+| 软件 | MikuMikuDance 9.32 x64（日文版。英语模式也可以），或 MikuMikuMoving 1.2.9.2（64bit・附赠・试验版） | MMD 9.32 x64・MMM 1.2.9.2。**中文版另支持运行时汉化插件（如 MMDZh），前提是 exe 本体未被修改** |
+| GPU | NVIDIA GTX 16 系／RTX 20 系以后。驱动用新版。其他 GPU 见下方「GPU 计算方式」 | RTX 3090（24GB）。有 GTX 1650（4GB）也能跑的报告 |
+| 运行库 | [Microsoft Visual C++ 可再发行程序包（x64）](https://aka.ms/vs/17/release/vc_redist.x64.exe)。没装的话，安装设置会引导你 | |
 
-入れ方によって、要る量が変わります。セットアップの「プロンプトを自由に書けるようにする」を外すと、プロンプトを読み取る Llama 3（約 8GB）を入れずに、サンプルの文だけで作れます（後から入れることもできます）。
+安装方式不同，需要的容量不同。安装设置里取消勾选「自由书写提示词」，就可以不装读取提示词的 Llama 3（约 8GB），只用示例句子生成（之后也可以再装）。
 
-| | 全部入れる | サンプルの文だけ（Llama なし） |
+| | 全部安装 | 只用示例句（不装 Llama） |
 |---|---|---|
-| VRAM | 6GB 以上（使うのは約 2.6GB） | 4GB 以上 |
-| メモリ | 16GB 以上（プロンプトの読み取りに約 8GB 使う） | 8GB 以上（まだ確かめていません） |
-| ディスク | 約 21GB（Kimodo 約 15GB・MotionBricks 約 6GB） | 約 13GB |
-| 落とす量（セットアップの時だけ） | 約 12GB | 約 4GB |
+| 显存 | 6GB 以上（实际占用约 2.6GB） | 4GB 以上 |
+| 内存 | 16GB 以上（读取提示词约用 8GB） | 8GB 以上（尚未验证） |
+| 硬盘 | 约 21GB（Kimodo 约 15GB・MotionBricks 约 6GB） | 约 13GB |
+| 下载量（仅安装时） | 约 12GB | 约 4GB |
 
-- AI の部分が使うのは、メモリ約 2.1GB（Kimodo 1.7GB・MotionBricks 0.4GB）と VRAM 約 2.6GB です（11-10 に測った値）。確かめた PC のメモリは 64GB で、メモリ 16GB の PC でも動いたと報告をいただきました
-- プロンプトの読み取りは CPU で動きます（1 文 0.5 秒ほど）。使ったメモリは、MMD・MMM を全部閉じるか、5 分使わなければ空けます
-- 入れた後でメモリが足りない時は、詳細の窓の「プロンプトの読み取り（Llama 3）を使う」を外すと、消さずにサンプルの文だけの形にできます
-- **メモリ 8GB の PC ではまだ確かめていません。動いた・動かなかったを教えてもらえると助かります**
-- 詳細の窓の「Kimodo」タブの下に、この PC の GPU とメモリで動くかの判定が出ます
+- AI 部分实际占用：内存约 2.1GB（Kimodo 1.7GB・MotionBricks 0.4GB）、显存约 2.6GB（11-10 实测值）。验证用的电脑是 64GB 内存，也有 16GB 内存能跑的报告
+- 提示词读取在 CPU 上运行（一句约 0.5 秒）。用过的内存会在关闭全部 MMD/MMM 或闲置 5 分钟后释放
+- 装好后内存不够时，在详细窗口取消勾选「使用提示词读取（Llama 3）」，不用删除就能变成只用示例句的模式
+- **8GB 内存的电脑尚未验证。跑通/跑不通都欢迎反馈**
+- 详细窗口「Kimodo」标签页下方会显示这台电脑的 GPU 和内存能否运行
 
-### GPU の方式
+### GPU 计算方式
 
-セットアップの最後の「試しに作る」が、その PC で動く方式を上から順に試して、通った方式を覚えます。選ぶ操作はありません。
+安装设置最后的「试做一次」会从上到下依次尝试这台电脑能用的方式，并记住通过的那一种。不需要手动选择。
 
-| 方式 | 使う GPU | 速さの目安 |
+| 方式 | 使用的 GPU | 速度参考 |
 |---|---|---|
-| CUDA | NVIDIA の GPU（GTX 16 シリーズ／RTX 20 シリーズ以降） | 2 秒の動きで 3 秒前後 |
-| DirectML（0.3.0 から・お試し） | DirectX 12 に対応した GPU（AMD の Radeon・Intel の Arc や内蔵 GPU・NVIDIA の GTX 10 シリーズなど） | RTX 3090 では CUDA と同じ（2 秒の動きで 3 秒・10 秒の動きで 7 秒） |
-| GPU なし | 使わない（CPU だけ） | 2 秒の動きで約 40 秒・10 秒の動きで 2〜4 分（Core i7-12700F） |
+| CUDA | NVIDIA GPU（GTX 16 系／RTX 20 系以后） | 2 秒动作约 3 秒 |
+| DirectML（0.3.0 起・试验性） | 支持 DirectX 12 的 GPU（AMD Radeon、Intel Arc 或核显、NVIDIA GTX 10 系等） | RTX 3090 与 CUDA 相同（2 秒动作 3 秒・10 秒动作 7 秒） |
+| 不用 GPU | 不使用（纯 CPU） | 2 秒动作约 40 秒・10 秒动作 2〜4 分钟（Core i7-12700F） |
 
-- どの方式でも、出来る動きの質は同じです（同じ計算を別の道具で行います）
-- DirectML の時は、初回だけモデルを変換します（約 1 分）。ディスクを約 2GB 多く使い、Kimodo のメモリは約 3GB になります
-- 今どの方式かは、詳細の窓の「Kimodo」タブの下の判定に出ます（DirectML・GPU なしの時）
-- Intel の内蔵 GPU（Iris Xe・メモリ 16GB のノート PC）で、DirectML で動いたと報告をいただきました（時間はかかったそうです）
-- **AMD の GPU・Intel の Arc・GTX 10 シリーズの実機ではまだ確かめていません。動いた・動かなかったを教えてもらえると助かります**（「困った時は」の記録のファイルがあると原因を追えます）
+- 无论哪种方式，生成的动作质量都相同（同样的计算换不同的工具执行）
+- DirectML 首次使用要转换模型（约 1 分钟），多占约 2GB 硬盘，Kimodo 内存约 3GB
+- 当前用哪种方式显示在详细窗口「Kimodo」标签页下方的判定里（DirectML・不用 GPU 时）
+- Intel 核显（Iris Xe・16GB 内存笔记本）有 DirectML 跑通的报告（据说比较耗时）
+- **AMD GPU、Intel Arc、GTX 10 系的真机尚未验证。跑通/跑不通都欢迎反馈**（附上「故障排查」里提到的记录文件更好定位）
 
-## インストール
+## 安装
 
-MMD と MMM で同じ zip を使います。`AIナカワリ導入.cmd` が、展開したフォルダにある方（`MikuMikuDance.exe` か `MikuMikuMoving64.exe`）を見分けて入れます。
+MMD 和 MMM 用同一个 zip。`AIナカワリ導入.cmd` 会自动识别解压目录里是 `MikuMikuDance.exe` 还是 `MikuMikuMoving64.exe` 并装入。
 
-### 1. zip を落として、MMD（MMM）のフォルダに展開する
-[Releases](https://github.com/BeamManP/MMD-AINakawari/releases) の「Assets」から `MMD-AINakawari-<版>.zip`（約 70MB）を落とします。
-その下の「Source code (zip)」や、このページの緑の「Code」→「Download ZIP」はプログラムのソースで、`AIナカワリ導入.cmd` が入っていません。
-**MMD（MMM）を閉じてから**、zip の中身を `MikuMikuDance.exe`（MMM なら `MikuMikuMoving64.exe`）のあるフォルダに展開します。中身は次の 3 つです。
+### 1. 下载 zip 并解压到 MMD（MMM）文件夹
+从 [Releases](https://github.com/BeamManP/MMD-AINakawari/releases) 的「Assets」下载 `MMD-AINakawari-<版本>.zip`（约 70MB）。
+下方的「Source code (zip)」和页面绿色「Code」→「Download ZIP」是程序源码，里面没有 `AIナカワリ導入.cmd`。
+**先关闭 MMD（MMM）**，把 zip 内容解压到 `MikuMikuDance.exe`（MMM 则是 `MikuMikuMoving64.exe`）所在的文件夹。内容是这 3 样：
 
 ```
 AIナカワリ導入.cmd
-MMD-AINakawari\          AIナカワリ 本体（Python とプログラム。MMM 用の DLL も中に入っています）
-plugin\MMD-AINakawari\   MMD に読み込ませる DLL（MMM の時は導入.cmd が片付けます）
+MMD-AINakawari\          AI中割 本体（Python 和程序。MMM 用的 DLL 也在里面）
+plugin\MMD-AINakawari\   给 MMD 加载的 DLL（MMM 时导入.cmd 会收拾掉）
 ```
 
-### 2. `AIナカワリ導入.cmd` をダブルクリックする
-黒い窓が開いて、見つけた方に入れます。「できました」と出たら、何かキーを押して閉じます。
+### 2. 双击 `AIナカワリ導入.cmd`
+弹出黑色窗口，自动装进找到的那个。「できました」（完成了）出现后按任意键关闭。
 
-| | MMD の時 | MMM の時 |
+| | MMD 时 | MMM 时 |
 |---|---|---|
-| 置く物 | MMDPlugin（`MMDPlugin.dll`・`d3d9.dll`・`d3dx9_43.dll`）を `MikuMikuDance.exe` の横に。MMDPlugin が入っていれば何も変えません | MMM の `Plugins\` に、ボタン・パネルの DLL と、MMM とやり取りする橋渡し（MmmBridge）。MMDPlugin は置きません |
-| MME | 入っている時は、MME のファイル（`d3d9.dll`・`MMEffect.dll` など）を `plugin\mme\` に移します。MMDPlugin の説明書にある「MME も使う場合」の置き方で、MME はそのまま動きます | 関係ありません |
-| 何も変えずに止まる時（黒い窓に理由が出ます） | MMD が開いている／MMD が 9.32 x64 の日本語版ではない／MME でも MMDPlugin でもない `d3d9.dll` や `d3dx9_43.dll` がある | MMM が開いている／MMM が 1.2.9.2（64bit）ではない |
+| 放置内容 | 把 MMDPlugin（`MMDPlugin.dll`・`d3d9.dll`・`d3dx9_43.dll`）放到 `MikuMikuDance.exe` 旁边。已装 MMDPlugin 则不改动 | 把按钮・面板的 DLL 和与 MMM 通信的桥（MmmBridge）放进 MMM 的 `Plugins\`。不放置 MMDPlugin |
+| MME | 已装 MME 时，把 MME 的文件（`d3d9.dll`・`MMEffect.dll` 等）移到 `plugin\mme\`。按 MMDPlugin 说明书的「同时使用 MME」摆法，MME 照常工作 | 无关 |
+| 什么都不动就停止时（黑窗口里显示原因） | MMD 正在运行／MMD 不是 9.32 x64 日文版／存在既不是 MME 也不是 MMDPlugin 的 `d3d9.dll` 或 `d3dx9_43.dll` | MMM 正在运行／MMM 不是 1.2.9.2（64bit） |
 
-- Windows の「発行元を確認できませんでした」などの警告が出た時は、「実行」を押してください
-- zip を MMD・MMM のフォルダの外に展開した時は、フォルダを選ぶ窓が出て、そこへ写します
-- 同じフォルダに MMD と MMM の両方がある時は、黒い窓でどちらに入れるかを聞きます
-- プラグインの土台の [MMDPlugin](https://bowlroll.net/file/121761)（ver0.41 64bit・おいがみ さん）は zip に入っています
+- 出现 Windows「无法验证发布者」等警告时，按「运行」
+- zip 解压到了 MMD・MMM 文件夹之外时，会弹出文件夹选择窗口，复制到所选文件夹
+- 同一文件夹里同时有 MMD 和 MMM 时，黑窗口里会问装到哪个
+- 插件底座 [MMDPlugin](https://bowlroll.net/file/121761)（ver0.41 64bit・おいがみ 制作）已包含在 zip 里
 
-### 3. 起動して、セットアップする
-1. AIナカワリ の詳細の窓を開きます
-   - MMD: メニューバーの「AIナカワリ」→「AIナカワリの窓を開く」
-   - MMM: ツールバーの「**AIナカワリ**」のボタン
-2. 窓の下の「**セットアップ**」を押します
-3. 入れる場所を決めます（最初は、空きのいちばん多いドライブの `\AINakawari`）。半角の英数字だけのフォルダにしてください
-4. ライセンスを読んで「同意して入れます」に印を付け、「**セットアップを始める**」を押します
+### 3. 启动并运行安装设置
+1. 打开 AI中割 的详细窗口
+   - MMD：菜单栏「AI中割」→「打开 AI中割 窗口」（日文版为「AIナカワリ」→「AIナカワリの窓を開く」）
+   - MMM：工具栏的「**AI中割**」按钮
+2. 按窗口下方的「**安装设置**」（セットアップ）
+3. 决定安装位置（默认是剩余空间最多的盘的 `\AINakawari`）。请使用**只有半角英数字**的文件夹
+4. 阅读许可协议，勾选「同意并安装」，按「**开始安装设置**」
 
-Kimodo・MotionBricks・それを動かす Python を落として入れ、最後に試しに 1 回ずつ作って確かめます。落とす量は約 12GB です。
+接下来会下载并安装 Kimodo、MotionBricks 和运行它们的 Python，最后各试做一次确认。下载量约 12GB。
 
-- 時間は回線によって 20 分〜2 時間ほどです。いちばん長いのは「Kimodo の Python の環境を作る」（約 5GB）と、プロンプトを読み取るモデル（約 8GB）です
-- 進んでいる間は、窓の下の青い字に「かかった時間」と「ここまでに落として入れた量」が出ます。数字が増えていれば、進んでいます
-- 通信が途中で切れた時は、少し待って自動で続きからやり直します。それでも止まった時は、時間をおいてもう一度「セットアップ」を押してください
-- 途中で止まっても（失敗・中止・PC の再起動）、もう一度「セットアップ」を押せば、止まった段から続きます
-- セットアップの窓は、閉じても裏で進みます。もう一度「セットアップ」を押すと出てきます
+- 时间视网速 20 分钟〜2 小时。最耗时的是「搭建 Kimodo 的 Python 环境」（约 5GB）和读取提示词的模型（约 8GB）
+- 进行中时，窗口下方的蓝字会显示「已用时间」和「至此已下载安装的量」。数字在涨就说明在正常推进
+- 通信中断时会稍等片刻自动从断点重试。仍然停止时，稍等片刻再按一次「安装设置」
+- 即使中途停止（失败・中止・电脑重启），再按一次「安装设置」就会从停下的那一步继续
+- 安装设置窗口关掉后仍在后台进行。再按一次「安装设置」就能唤出
 
-簡易操作パネルが出ていれば、使えます（MMD は下の段の右の「AIナカワリ簡易操作」、MMM は左の欄の「プラグイン」のタブの中）。
+出现简易操作面板就可以使用了（MMD 是下排右侧的「AI中割 简易操作」，MMM 在左侧「插件」标签页里）。
 
-![MMD の下の段に並んだ簡易操作パネル](docs/images/bottom_strip.png)
+![MMD 下排的简易操作面板](docs/images/bottom_strip.png)
 
-## 使い方
+## 用法
 
-### 簡易操作パネル
+### 简易操作面板
 
-![簡易操作パネル](docs/images/panel.png)
+![简易操作面板](docs/images/panel.png)
 
-1. モデルを選び、いつもどおりポーズを付けてキーを打ちます
-2. タイムラインで、作り直したい範囲の**最初と最後のキーを選びます**（四角で囲む、または MMD ならタイムラインの下の「範囲選択」。どのボーンの行でもかまいません）。パネルに「選んだキー 30〜90F」と出ます
-3. 左上で作り方を選びます
-   - **Kimodo**: プロンプト（英語）に動きを書きます。分からない時は「**サンプルから選ぶ ▼**」から選べます
-   - **MotionBricks**: プロンプトは要りません（欄は灰色になります）
-4. 「**生　成**」（またはプロンプト欄で Enter）。下の 1 行に「生成中…」→「できました」と出たら、再生して確かめます
-5. 気に入らなければ「**元に戻す**」か、プロンプトを変えてもう一度「生成」
+1. 选择模型，像平常一样摆姿势、打关键帧
+2. 在时间线上**选中想重做范围的最初和最后的关键帧**（框选，或用 MMD 时间线下方的「范围选择」。选哪根骨骼的行都行）。面板会显示「选中关键帧 30〜90F」
+3. 左上选择生成方式
+   - **Kimodo**：在提示词（英文）里写动作。不会写就从「**示例 ▼**」里选
+   - **MotionBricks**：不需要提示词（输入框变灰）
+4. 按「**生　成**」（或在提示词框里按 Enter）。下方一行显示「生成中…」→「完成了」后，播放确认
+5. 不满意就按「**撤销**」，或改提示词再「生成」
 
-- 生成中は「生成」が「**中断**」に変わります。押し間違いや、範囲・プロンプトの間違いに気づいた時に押すと、作るのをやめます。キーは押す前のままです。書き込みが始まると押せなくなり、その時は終わってから「元に戻す」で戻せます
-- パネルの「生成」は「キーの間を埋める」で作ります。ほかの作り方や seed などの細かい設定は、「**詳　細**」の窓で選べます
-- 範囲が「選んだキーの間」（既定）の時は、キーを 2 つ以上選ぶまで「生成」は押せません。詳細の窓で範囲を「全部」にすると、パネルも全部のキーで作ります（パネルの字が「全部のキー」になります）
-- プロンプト欄に打っている間は、MMD のショートカットキーは効きません。欄の外（タイムラインなど）を押すか Esc で戻ります
-- カメラ・照明・アクセサリのモードの時は、パネルは出ません
-- MMM では、生成した動きは **Ctrl+Z 1 回**でも生成の前に戻ります
+- 生成中「生成」会变成「**中断**」。发现选错范围或提示词写错时按下，即停止生成。关键帧保持原样。开始写回 MMD 后无法按下，那时等结束后用「撤销」
+- 面板的「生成」按「填充关键帧之间」生成。其他生成方式和 seed 等详细设置在「**详　细**」窗口里
+- 范围为「选中关键帧之间」（默认）时，选中 2 个以上关键帧前「生成」不可按。在详细窗口把范围改成「全部」后，面板也会对全部关键帧生成（面板的字变成「全部关键帧」）
+- 在提示词框里输入时，MMD 的快捷键无效。点击框外（时间线等）或按 Esc 返回
+- 相机・灯光・附件模式下不显示面板
+- MMM 里，生成的动作按 **Ctrl+Z 一次**也能回到生成前
 
-![サンプルの一覧](docs/images/samples.png)
+![示例列表](docs/images/samples.png)
 
-### 詳細の窓（パネルの「詳　細」か、MMD のメニュー・MMM のボタン）
+### 详细窗口（面板的「详　细」，或 MMD 菜单・MMM 按钮）
 
-![詳細の窓](docs/images/window.png)
+![详细窗口](docs/images/window.png)
 
-| 欄 | 中身 |
+| 栏目 | 内容 |
 |---|---|
-| タブ | **Kimodo**（プロンプトで作る）／**MotionBricks**（プロンプト無しの中割り）。パネルの選び方と同じ |
-| やりたいこと | **キーの間を埋める**／**続きを足す**（範囲の終わりの後ろへ、長さのフレーム数だけ。範囲が「全部」なら最後のキーの後ろへ）／**プロンプトだけで作る**（キーのポーズを使わない）／**センターに合わせて作る**（腰の位置と高さだけをセンターのキーと補間に合わせ、ポーズと動きはプロンプトから作る。範囲はキーの間を埋めると同じ） |
-| 長さ | 続きを足す時は「足すフレーム数」。30〜60F を選んで 100 なら、61〜160F を作ります（窓に作る所が出ます）。足す所に体のキーがあると赤い字で知らせ、生成するとそのキーは作った動きで上書きされます。指・表情のキーはそのまま |
-| キーの間引き | 生成したキーを、補間曲線で表せる所だけ減らします（Kimodo のタブは長さの下、MotionBricks のタブは「手首は MMD の補間にする」の下）。スライダで **しない／細かく／ふつう（推奨）／粗く／とても粗く** の 5 段。間引かないと、作った所のほぼ毎フレームにキーが入ります（「ふつう」で、300 フレームの動きのモデル全体のキーが 9807 → 1017 個）。キーは全身で同じフレームにそろえて置き、そこで動いていないボーンには打ちません。打ったキー・範囲の端・範囲の外のキーはそのまま残ります。間引いた数はログに出ます |
-| 全ての親 | **移動を載せる**／**向きを載せる**（Kimodo のタブ・最初はオフ）。歩いた分の移動（腰の通り道をならした物）と向きの変わった分を全ての親のキーにし、センターには歩きの揺れだけ残します。全ての親のキーは数個に間引いて打ち、体の見た目は載せない時と同じです。載せるのは、決まっているのが始まりの姿勢だけの時（プロンプトだけで作る・続きを足す・後ろにキーの無い範囲の作り直し）。途中や範囲の終わりに体のキーがある時と、全ての親にキーがある時は今までどおりで、理由がログに出ます（パネルの「生成」はキーの間を埋めるので、ほとんど載りません）。載せた後に長さを変えて作り直す時は、先に「元に戻す」を押してください（前回打った全ての親のキーを、腰の通り道の目印として読みます） |
-| プロンプト | 行ごとに「そのフレームから次の行まで」の動き。「＋ 今のフレームで区切る」で行が増える。「サンプルから選ぶ ▼」もある |
-| プロンプトの効き・キーの効き | スライダ（0.5〜10）。推奨はどちらも 2 で、「推奨（2・2）に戻す」で戻せます。文の動きが弱い時はプロンプトの効きを 3〜5 に、キーの前後がカクつく時はキーの効きを少し上げます |
-| 詳しい設定 | 計算の回数・seed・仕上補正（足すべり・姿勢） |
-| 範囲 | **選んだキーの間**（既定）／**全部**（最初のキーから最後のキーまで） |
+| 标签页 | **Kimodo**（用提示词生成）／**MotionBricks**（无提示词补间）。与面板的选择联动 |
+| 想做的事 | **填充关键帧之间**／**续写**（在范围末端之后追加指定帧数。范围是「全部」时在最后一个关键帧之后）／**仅用提示词生成**（不使用关键帧的姿势）／**跟随中心生成**（只让腰的位置和高度跟随中心关键帧与补间，姿势和动作由提示词生成。范围与填充相同） |
+| 长度 | 续写时指「追加的帧数」。选 30〜60F 填 100，就生成 61〜160F（窗口里会显示生成范围）。追加位置上如有身体关键帧会红字提示，生成后那些关键帧会被生成的动作覆盖。手指・表情的关键帧保持原样 |
+| 关键帧精简 | 只在补间曲线能表达的位置保留生成的关键帧（Kimodo 标签页在「长度」下方，MotionBricks 标签页在「手腕用 MMD 补间」下方）。滑杆共 5 档：**不精简／精细／普通（推荐）／粗糙／非常粗糙**。不精简的话，生成部分几乎每帧都有关键帧（「普通」档下，300 帧动作的整模关键帧从 9807 → 1017 个）。关键帧全身对齐到同一帧放置，该帧没动的骨骼不打。自己打的关键帧・范围两端・范围外的关键帧原样保留。精简数量会写进日志 |
+| 全亲 | **承载移动**／**承载朝向**（Kimodo 标签页・默认关）。把走路产生的位移（腰轨迹的平整化）和转向量放进全亲的关键帧，中心骨只留走路的晃动。全亲的关键帧会精简到几个再打，身体外观与不承载时相同。只在「只有起始姿势是确定的」（仅用提示词生成・续写・范围后端没有关键帧的重做）时承载。范围中途或末端有身体关键帧时、以及全亲已有关键帧时照旧不承载，原因写在日志里（面板的「生成」是填充模式，基本不承载）。承载后改长度重做时，请先按「撤销」（上次打的全亲关键帧会被当作腰轨迹的标记读取） |
+| 提示词 | 每行表示「从该帧到下一行帧」的动作。「＋ 在当前帧分段」增行。也有「示例 ▼」 |
+| 提示词强度・关键帧强度 | 滑杆（0.5〜10）。推荐都是 2，可用「恢复推荐（2・2）」还原。句子动作太弱时把提示词强度调到 3〜5；关键帧前后卡顿时略调高关键帧强度 |
+| 高级设置 | 计算次数・seed・后处理（脚底滑动・姿势） |
+| 范围 | **选中关键帧之间**（默认）／**全部**（从最初到最后的关键帧） |
 
-プロンプトと作り方（Kimodo／MotionBricks）は、パネルと詳細の窓で共通です。どちらで変えても、もう一方にも入ります。
+提示词和生成方式（Kimodo／MotionBricks）在面板与详细窗口之间共用。任一边改动，另一边同步。
 
-### うまく作るコツ
-- プロンプトは英語で、「A person ＋ 動詞」の形が効きます（例: `A person waves with their right hand.`）。日本語はほとんど効きません
-- キーは 20 個くらいまでが目安です。多いとキーに縛られて動きが硬くなります
-- Kimodo は 1 区間 300 フレーム（10 秒）まで（範囲の外の勢いをつなぐ数フレームも数えるので、選ぶ範囲はそれより少し短めに）。長い時は範囲を分けて作ります
-- 区間の区切りのすぐ後ろにキーがある時は、つながりを保つため、区切りを 1 フレーム後ろへ自動でずらします
-- 最初の 1 回は、モデルの読み込みで 10〜20 秒ほど余分にかかります。2 回目からは 25 秒前後です（キーの間引き「ふつう」込み）
+### 出好动作的窍门
+- 提示词用英语，「A person ＋ 动词」的形式最有效（例：`A person waves with their right hand.`）。日语基本无效
+- 关键帧以 20 个左右为上限。太多会被关键帧束缚，动作变僵硬
+- Kimodo 单段最长 300 帧（10 秒）（连接范围外惯性的几帧也算在内，选的范围要比这略短）。更长时分段生成
+- 分段点紧后面有关键帧时，为保持连贯，分段点会自动后移 1 帧
+- 第一次生成要多花 10〜20 秒加载模型。第二次起约 25 秒（含关键帧精简「普通」）
 
-## 更新・アンインストール
+## 更新・卸载
 
-**更新**: 新しい版の zip を、同じように MMD（MMM）のフォルダに上書きで展開し、`AIナカワリ導入.cmd` をもう一度ダブルクリックします。窓の設定（`MMD-AINakawari\app\work\`）は残ります。そのあと「セットアップ」を開いて、「更新があります」と出ていたら「更新する」を押してください（版が変わった手順だけやり直します）。
+**更新**：把新版 zip 同样解压覆盖到 MMD（MMM）文件夹，再双击一次 `AIナカワリ導入.cmd`。窗口设置（`MMD-AINakawari\app\work\`）会保留。之后打开「安装设置」，若显示「有更新」就按「更新」（只重做版本变化了的步骤）。
 
-**アンインストール**: MMD（MMM）を閉じてから、次の物を消します。
+**中文版的更新**：装完新版 zip 后，把 `zh_补丁包\` 里的内容按原路径重新拖进去覆盖（或再跑一次一键部署 bat）。详见下文「中文版补充说明」。
 
-| | 消す物 |
+**卸载**：关闭 MMD（MMM）后删除以下内容。
+
+| | 删除的东西 |
 |---|---|
-| MMD | MMD のフォルダの `AIナカワリ導入.cmd`・`MMD-AINakawari\`・`plugin\MMD-AINakawari\` |
-| MMM | MMM のフォルダの `AIナカワリ導入.cmd`・`MMD-AINakawari\` と、`Plugins\` の `MMM-AINakawari.dll`・`MMM-AINakawari.ini`・`MmmBridge.dll`・`MmmBridgeCore\` |
-| どちらも | セットアップで選んだ場所（例: `D:\AINakawari\`） |
+| MMD | MMD 文件夹的 `AIナカワリ導入.cmd`・`MMD-AINakawari\`・`plugin\MMD-AINakawari\` |
+| MMM | MMM 文件夹的 `AIナカワリ導入.cmd`・`MMD-AINakawari\`，以及 `Plugins\` 的 `MMM-AINakawari.dll`・`MMM-AINakawari.ini`・`MmmBridge.dll`・`MmmBridgeCore\` |
+| 两者都要 | 安装设置时选的位置（例：`D:\AINakawari\`） |
 
-MMD の時、MMDPlugin（`MMDPlugin.dll`・`d3d9.dll`・`d3dx9_43.dll`・`plugin\MMDPlugin\`）と、`plugin\mme\` に移した MME は残ります。ほかの MMDPlugin のプラグインを使っていなければ、MMDPlugin の 3 ファイルと `plugin\MMDPlugin\` を消し、`plugin\mme\` の中身を `MikuMikuDance.exe` の横に戻すと、元の形になります。
+MMD 时，MMDPlugin（`MMDPlugin.dll`・`d3d9.dll`・`d3dx9_43.dll`・`plugin\MMDPlugin\`）和移到 `plugin\mme\` 的 MME 会留下。如果没有在用其他 MMDPlugin 插件，删掉 MMDPlugin 的 3 个文件和 `plugin\MMDPlugin\`，把 `plugin\mme\` 里的内容放回 `MikuMikuDance.exe` 旁边即可复原。
 
-## 困った時は
+## 故障排查
 
-詳細の窓の「**ログ**」→「**記録のフォルダを開く**」で、記録のフォルダ（`MMD-AINakawari\app\work\`）が開きます。困った時は、次のファイルを [Issues](https://github.com/BeamManP/MMD-AINakawari/issues) に添えて知らせてください。
+详细窗口「**日志**」→「**打开记录文件夹**」可打开记录文件夹（`MMD-AINakawari\app\work\`）。出问题时，把下面的文件附到 [Issues](https://github.com/BeamManP/MMD-AINakawari/issues) 反馈（**中文版用户也可直接把日志发给帮你汉化的人看**）。
 
-| ファイル | 中身 |
+| 文件 | 内容 |
 |---|---|
-| `app.log`（と `app.log.1`） | 窓のログ・セットアップのログ・失敗した時のエラーの詳しい場所 |
-| `Kimodo_server.log`・`llama_server.log` など、名前が `_server.log` で終わるファイル | 裏で動く Kimodo・プロンプトの読み取り（llama.cpp）・MotionBricks の記録（最後に起動した時の分） |
+| `app.log`（和 `app.log.1`） | 窗口日志・安装设置日志・失败时错误的详细信息 |
+| `Kimodo_server.log`・`llama_server.log` 等以 `_server.log` 结尾的文件 | 后台运行的 Kimodo・提示词读取（llama.cpp）・MotionBricks 的记录（最近一次启动的） |
 
-よくあること:
-- **セットアップが進まないように見える**: 窓の下の青い字の時間と量を見てください。増えていれば進んでいます（大きい部品は 1 個で約 2.5GB あり、回線によっては 1 つの手順に 30 分以上かかります）。5 分たっても量が増えない時は、「中止」を押してから、もう一度「セットアップ」を押してください。済んだ手順は飛ばして、続きから始めます
-- **「通信が途中で切れたようです」と出て止まる**: 時間をおいて、もう一度「セットアップ」を押してください。落とし終わった物は残っているので、続きからになります。別の場所に自分で入れた PyTorch などは使いません（セットアップは、入れる場所の中に専用の環境を作ります）
-- **入れ終わったのに動かなくなった・途中で止めた後の様子がおかしい**: 「セットアップ」を開いて「**点検して直す**」を押してください。入っている物を確かめて（10 秒ほど）、欠けている物だけ入れ直します。途中で止まったフォルダにもう一度かけても、同じように欠けた所から直します
-- **セットアップの「試しに作る」で止まる**: GPU のドライバを新しくしてから、もう一度「セットアップ」を押してください
-- **GPU を替えた**: 「セットアップ」を開くと「更新があります」と出るので、「更新する」を押してください。試しに作り直して、新しい GPU で動く方式を選び直します（1〜2 分）
-- **「空きが足りません」**: 入れる場所を、空きの多いドライブに変えてください
-- **MMD が起動してすぐ落ちる**: `plugin\` の下に、AIナカワリの DLL と ini 以外の物（Python など）を置いていないか見てください。MMDPlugin は `plugin\` の下の DLL を全部読み込もうとします
+常见问题：
+- **安装设置看起来不动了**：看窗口下方蓝字的时间和量。在涨就是在正常推进（大的部件单个约 2.5GB，视网速一步可能超过 30 分钟）。5 分钟后量仍不涨时，按「中止」再按一次「安装设置」。已完成的步骤会跳过，从断点继续
+- **显示「通信似乎中断了」并停下**：稍等片刻再按一次「安装设置」。已下载的内容会保留，从断点继续。不会使用你自己装在别处的 PyTorch 等（安装设置会在安装位置内搭建专用环境）
+- **装完却跑不动・中途停止后状态异常**：打开「安装设置」按「**检查并修复**」。它会确认已安装的内容（约 10 秒），只补装缺失的部分。对中途停止的文件夹再跑一次也一样从缺的地方修
+- **安装设置的「试做一次」失败**：先更新 GPU 驱动，再按一次「安装设置」
+- **换过 GPU**：打开「安装设置」会显示「有更新」，按「更新」。会重新试做，重新选择新 GPU 能用的方式（1〜2 分钟）
+- **「空间不足」**：把安装位置换到剩余空间多的盘
+- **MMD 一启动就闪退**：检查 `plugin\` 下有没有放了 AI中割 的 DLL 和 ini 之外的东西（比如 Python）。MMDPlugin 会尝试加载 `plugin\` 下的所有 DLL
+- **清理 C 盘缓存后插件提示要下载模型**：AI 环境全部装在安装设置选的位置（如 `D:\AINakawari\`），清 C 盘不会删到它。先直接试一次生成；仍不行时打开「安装设置」按「检查并修复」。**不要删除**安装位置里的 `.venv\`・`uv\python\`・`hf_cache\`・`text_encoder\`・`assets\`（详见下文「中文版补充说明」）
 
-## 分かっている制限
-- **PMX のモデルだけ**に対応しています（PMD は非対応）。標準ボーンの名前（センター・上半身・腕・ひじなど）でボーンを探します。無いボーン（上半身2・首・片腕など）は飛ばして作り、ログに「注意: モデルに無いボーンは飛ばして作ります」と出します。**センター・下半身と、左右どちらかの足・ひざ・足首**が無いモデルだけは、体の位置と大きさが決まらないので止まります
-- 指・表情・髪などは作りません（補間のまま）
-- 床は平らな 1 枚として扱い、**範囲の中で一番低いキーの足**を床にします。足が床に埋まったキーが 1 つあると、ほかのフレームもそのぶん沈みます（ログに「注意: 足の裏がほかのキーより低いキーがあります」と出ます。足ＩＫの高さを直してください）。階段の上り下りのように、キーごとに床の高さが違う動きは素直には作れません
-- キーのポーズの差が大きいと、前腕・手首が 1 フレームで大きく回ることがあります（中割りなら「手首は MMD の補間にする」で抑えられます）
-- 選んだ範囲だけ作り直す時、範囲の外の動きは、移動 0.05・回転 0.5° までのずれで保ちます。曲線で表せない急な所は、範囲の外にもキーが増えることがあります
-- キーの間引き（「ふつう」）は、ボーンごとに移動 0.05・回転 0.5°、手首・頭・足ＩＫなどの位置で 0.06（約 0.5cm）までのずれを許します。「細かく」はその半分、「粗く」は 2 倍、「とても粗く」は 4 倍です。間引きの分、生成は数秒長くかかります（300 フレームで 6 秒前後）。Kimodo の手首などがフレームごとに細かく揺れる動きでは、その揺れも保つのでキーがあまり減りません（減らしたい時は「粗く」に）
-- 物理演算をオフにしたキーは、生成や「元に戻す」でオンに戻ることがあります（未確認）
-- MMD は 9.32 x64 の日本語版でしか確かめていません（MMD のメモリから直接読む所があるため、ほかの版では動きません）
-- MMM は 1.2.9.2（64bit）だけです（MMM の公開されていない中身を使って元に戻すに載せているため）。確かめたのは 1 つのモデルと 2 つのモーションだけです。**うまく動いた・動かなかったを教えてもらえると助かります**
-- MMM では、書き換えるのは選んでいるモデルの一番下のモーションレイヤのボーンだけです（表情・ほかのレイヤには触りません）。zip の中から読み込んだモデルには、まだ対応していません（知らせを出して止まります）
+## 已知限制
+- 只支持 **PMX 模型**（不支持 PMD）。按标准骨骼名（中心・上半身・腕・肘等）寻找骨骼。没有的骨骼（上半身2・颈・单腕等）会跳过生成，日志提示「注意：模型中没有的骨骼已跳过」。**唯独缺少中心・下半身和任意一侧的脚・膝・脚踝**的模型，因身体位置和大小无法确定而停止
+- 手指・表情・头发等不生成（保持补间）
+- 地面按平坦的一张处理，以**范围内最低关键帧的脚**为地面。只要有一个关键帧的脚陷进地面，其他帧也会相应下沉（日志提示「注意：有脚底比其他关键帧低的关键帧」。请修正脚 IK 的高度）。上下楼梯这种每个关键帧地面高度不同的动作无法直接生成
+- 关键帧姿势差异过大时，前臂・手腕可能在 1 帧内大幅转动（补间模式下可用「手腕用 MMD 补间」抑制）
+- 只重做选中范围时，范围外的动作按移动 0.05・旋转 0.5° 以内的偏差保留。曲线无法表达的急变处，范围外也可能增加关键帧
+- 关键帧精简（「普通」档）允许每根骨骼移动 0.05・旋转 0.5°、手腕・头・脚 IK 等位置 0.06（约 0.5cm）以内的偏差。「精细」是它的一半，「粗糙」是 2 倍，「非常粗糙」是 4 倍。精简会让生成多花几秒（300 帧约 6 秒）。Kimodo 生成的手腕等逐帧细颤的动作，连颤动也一起保留，所以关键帧减不了太多（想减就调「粗糙」）
+- 关闭物理演算的关键帧，在生成或撤销后可能变回开启（未确认）
+- MMD 只在 9.32 x64 日文版上验证过（有直接读取 MMD 内存的部分，其他版本无法运行）。**中文版在此之上兼容「不改 exe 文件的运行时汉化插件」（如 MMDZh）；若 exe 本体被修改过则无法运行**
+- MMM 仅支持 1.2.9.2（64bit）（撤销功能依赖 MMM 未公开的内部结构）。只验证过 1 个模型和 2 个动作。**跑通/跑不通都欢迎反馈**
+- MMM 里，改写的只是所选模型最下层动作层的骨骼（不碰表情和其他层）。还不支持从 zip 里加载的模型（会提示后停止）
 
-## ライセンスとクレジット
-- このリポジトリのコード: [MIT-0](LICENSE)
-- スクリーンショットのモデル: Tda式初音ミクV4X（Tda さん）。モデルは同梱していません。初音ミクは クリプトン・フューチャー・メディア株式会社 のキャラクターです
-- [Kimodo](https://github.com/nv-tlabs/kimodo)（NVIDIA）: コードは Apache-2.0、モデルは [NVIDIA Open Model License](https://huggingface.co/nvidia/Kimodo-SOMA-RP-v1.2)
-- [MotionBricks](https://github.com/NVlabs/motionbricks)（NVIDIA）: コードは Apache-2.0、モデルは NVIDIA Open Model Agreement
-- [Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)（Meta）: [Meta Llama 3 Community License](https://huggingface.co/fernandotonon/Llama-3-LLM2Vec-8B-Kimodo-TextEncoder-GGUF/blob/main/LICENSE-Llama-3.txt)・[使い方の決まり](https://huggingface.co/fernandotonon/Llama-3-LLM2Vec-8B-Kimodo-TextEncoder-GGUF/blob/main/USE_POLICY-Llama-3.md)（Kimodo がプロンプトの読み取りに使う）。**Built with Meta Llama 3**
-- [LLM2Vec](https://huggingface.co/McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp)（McGill-NLP）: MIT
-- [Llama-3-LLM2Vec-8B-Kimodo-TextEncoder-GGUF](https://huggingface.co/fernandotonon/Llama-3-LLM2Vec-8B-Kimodo-TextEncoder-GGUF)（fernandotonon さん）: Llama 3 と LLM2Vec を 8bit（GGUF Q8_0）にした物。プロンプトの読み取りはこれを使う（Meta Llama 3 Community License）
-- [llama.cpp](https://github.com/ggml-org/llama.cpp)（ggml-org）: MIT。プロンプトの読み取りを CPU で動かす（セットアップが公式の CPU 版を落とす）
-- [MMDPlugin](https://bowlroll.net/file/121761)（おいがみ さん）: zip に同梱（説明書の「本体の転載は、非商用に限り連絡不要」による）。`d3dx9_43.dll` も MMDPlugin の物です（Microsoft の DirectX の物ではありません）
-- [mmd-mcp](https://github.com/BeamManP/mmd-mcp)（MIT-0 ほか）
-- [mmm-mcp](https://github.com/BeamManP/mmm-mcp)（MIT-0）: MMM の中の橋渡し（`MmmBridge.dll`・`MmmBridge.Core.dll`）。zip に同梱
-- MikuMikuMoving（Mogg さん）: MMM 版のボタン・パネルと橋渡しは、MMM のプラグインの口（`MikuMikuPlugin.dll`）を使います。MMM のファイルは同梱していません。元に戻すの作りは mfakane さんの [MikuMikuMoving-Plugins](https://github.com/mfakane/MikuMikuMoving-Plugins)（WTFPL）の考え方によります
-- zip に同梱の Python（python-build-standalone）と uv などのライセンスは、zip の `MMD-AINakawari\THIRD_PARTY.txt` に書いています
+## 许可与致谢
+- 本仓库的代码：[MIT-0](LICENSE)
+- 截图中的模型：Tda 式初音未来 V4X（Tda 制作）。模型不随 zip 附带。初音未来是 Crypton Future Media 株式会社的角色
+- [Kimodo](https://github.com/nv-tlabs/kimodo)（NVIDIA）：代码 Apache-2.0，模型 [NVIDIA Open Model License](https://huggingface.co/nvidia/Kimodo-SOMA-RP-v1.2)
+- [MotionBricks](https://github.com/NVlabs/motionbricks)（NVIDIA）：代码 Apache-2.0，模型 NVIDIA Open Model Agreement
+- [Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)（Meta）：[Meta Llama 3 Community License](https://huggingface.co/fernandotonon/Llama-3-LLM2Vec-8B-Kimodo-TextEncoder-GGUF/blob/main/LICENSE-Llama-3.txt)・[使用政策](https://huggingface.co/fernandotonon/Llama-3-LLM2Vec-8B-Kimodo-TextEncoder-GGUF/blob/main/USE_POLICY-Llama-3.md)（Kimodo 读取提示词时使用）。**Built with Meta Llama 3**
+- [LLM2Vec](https://huggingface.co/McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp)（McGill-NLP）：MIT
+- [Llama-3-LLM2Vec-8B-Kimodo-TextEncoder-GGUF](https://huggingface.co/fernandotonon/Llama-3-LLM2Vec-8B-Kimodo-TextEncoder-GGUF)（fernandotonon 制作）：把 Llama 3 和 LLM2Vec 做成 8bit（GGUF Q8_0）的版本。提示词读取使用它（Meta Llama 3 Community License）
+- [llama.cpp](https://github.com/ggml-org/llama.cpp)（ggml-org）：MIT。在 CPU 上运行提示词读取（安装设置下载官方 CPU 版）
+- [MMDPlugin](https://bowlroll.net/file/121761)（おいがみ 制作）：随 zip 附带（依据说明书「本体转载限非商用、无需联系」）。`d3dx9_43.dll` 也是 MMDPlugin 的（不是微软 DirectX 的）
+- [mmd-mcp](https://github.com/BeamManP/mmd-mcp)（MIT-0 等）
+- [mmm-mcp](https://github.com/BeamManP/mmm-mcp)（MIT-0）：MMM 内部的桥（`MmmBridge.dll`・`MmmBridge.Core.dll`）。随 zip 附带
+- MikuMikuMoving（Mogg 制作）：MMM 版按钮・面板与桥使用 MMM 的插件接口（`MikuMikuPlugin.dll`）。不附带 MMM 的文件。撤销的实现思路参考 mfakane 的 [MikuMikuMoving-Plugins](https://github.com/mfakane/MikuMikuMoving-Plugins)（WTFPL）
+- zip 附带的 Python（python-build-standalone）与 uv 等的许可写在 zip 的 `MMD-AINakawari\THIRD_PARTY.txt`
 
-AI のモデル（Kimodo・MotionBricks・Llama 3・LLM2Vec）と llama.cpp は、zip にもこのリポジトリにも入っていません
-（サンプルの文を上のプロンプトの読み取りで数にした結果 44 文分・1MB 足らずだけは、Llama なしでも作れるように `mmd_ainakawari/text_cache` に入れています）。セットアップが、それぞれの配布元から落とします（セットアップの画面でライセンスに同意してから）。
+AI 模型（Kimodo・MotionBricks・Llama 3・LLM2Vec）和 llama.cpp 都不在 zip 和本仓库里
+（只有用示例句换算的 44 句・不足 1MB 的提示词读取结果放在 `mmd_ainakawari/text_cache`，让「不装 Llama」的模式也能用）。安装设置会从各自的发布处下载（在安装设置画面同意许可后）。
 
-## 開発者向け
-リポジトリから動かす時は、[mmd-mcp](https://github.com/BeamManP/mmd-mcp) の Python 環境（`pip install -e . numpy` と `scripts\build_native.cmd`。Visual Studio 2022 の C++ が要ります）で窓を動かします。
-- セットアップは手でも回せます: `python -m mmd_ainakawari.installer.steps D:\AINakawari`（uv は PATH の物を使います）
-- 前に手で入れた Kimodo・MotionBricks の場所を書く: `python -m mmd_ainakawari.paths F:\kimodo F:\motionbricks`
-- MMD のプラグインのビルド: `mmd_plugin\build.cmd`（MMDPlugin の開発用ファイル `mmdplugin_dev_ver0.41_x64` の中身を `work\mmdplugin\dev` に置くか、その場所を環境変数 `AINAKAWARI_SDK` で渡す）。ini は `mmd_plugin\MMD-AINakawari.ini.example` を見本に
-- MMM のボタン・パネルのビルド: `dotnet build mmm_plugin\MMM-AINakawari.csproj -c Release -p:MmmDir=<MMM のフォルダ>\`（.NET の SDK が要ります）。ini は `mmm_plugin\MMM-AINakawari.ini.example` を見本に。橋渡しは [mmm-mcp](https://github.com/BeamManP/mmm-mcp) の README のとおりに組み立てます
-- 配布の zip を作る: `python tools\release\build_release.py --mmdplugin <MMDPlugin_v0.41_x64.zip> --mmm-mcp <mmm-mcp のリポジトリ>`（mmm-mcp の隣の `MikuMikuMoving64\` の MMM を参照して組み立てます。できた物は `work\release\`）
+## 中文版补充说明
 
-## 開発の記録
-仕組み・踏んだ問題・確かめた数字は [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) にまとめています。
+**这个仓库改了什么**：
+- DLL（菜单・右下角面板・错误弹窗的中文文案 + 兼容汉化 MMD 的菜单定位）—— 已编译好，在 `zh_补丁包\`
+- 12 个 Python/文本文件（界面・日志・安装设置全中文的翻译表 + 中文控件兼容层）—— 在 `zh_补丁包\app\`
+- **不修改** `python\`、`site-packages\`、`work\`（你的设置和日志），也不修改 MMDZh 的任何文件
+
+**作者更新后的部署**（全程拖拽，无命令行）：
+1. 按上面「安装」一节正常装新版 zip（双击 `AIナカワリ導入.cmd`）
+2. 把 `zh_补丁包\app` 文件夹拖到 `<MMD 文件夹>\MMD-AINakawari\` 上选「替换」
+3. 把 `zh_补丁包\MMD-AINakawari.dll` 复制到 `<MMD 文件夹>\Plugin\MMD-AINakawari\` 覆盖
+4. 若新界面冒出个别日文句子，是翻译表还没收录新文字，不影响使用；若作者改了菜单/面板相关的 C++ 代码，DLL 需要重新编译一次（`tools\zh_patch\build_dll.cmd`）
+
+**清 C 盘缓存的注意事项**：AI 环境装在安装设置选的位置（如 `D:\AINakawari\`），C 盘缓存与它无关。该位置里**不能删**的东西：
+| 不能删 | 是什么 | 删了的后果 |
+|---|---|---|
+| `kimodo\.venv\` | Kimodo 的 Python 环境 | 要重装（约 5GB 下载） |
+| `uv\python\` | 上面 venv 依赖的基础 Python | venv 全部失效，要整个重装 |
+| `kimodo\hf_cache\` | Kimodo 模型权重（约 1.1GB） | 重新下载 |
+| `kimodo\text_encoder\` | 提示词读取的 GGUF（约 7.4GB） | 重新下载 |
+| `kimodo\llamacpp\` | llama.cpp 的 llama-server | 重新下载 |
+| `motionbricks\motionbricks\assets\` | MotionBricks 的 ONNX 模型（约 1.1GB） | 重新下载 |
+| `motionbricks\.venv\` | MotionBricks 的 Python 环境 | 要重装 |
+
+可以删的：安装位置里的 `hf_home\`・`setup_test\`（空文件夹）、`.trt-cache\`（删了下次生成先多等约 1 分钟）、`MMD-AINakawari\app\work\` 里的临时 VMD（插件自己也会清）。C 盘的 Temp、浏览器缓存、DXCache 随便清。
+
+**回滚中文版**：第一次覆盖时每个被替换的文件旁边都留了 `.orig` 备份，把 `.orig` 改回原名即可恢复日文原版；DLL 用发行版 zip 里的原版覆盖回去。
+
+## 开发者向
+
+从仓库直接运行时，用 [mmd-mcp](https://github.com/BeamManP/mmd-mcp) 的 Python 环境（`pip install -e . numpy` 与 `scripts\build_native.cmd`。需要 Visual Studio 2022 的 C++）启动窗口。
+- 手动运行安装设置：`python -m mmd_ainakawari.installer.steps D:\AINakawari`（uv 用 PATH 里的）
+- 指定之前手动装好的 Kimodo・MotionBricks 位置：`python -m mmd_ainakawari.paths F:\kimodo F:\motionbricks`
+- 构建 MMD 插件：`mmd_plugin\build.cmd`（把 MMDPlugin 开发文件 `mmdplugin_dev_ver0.41_x64` 的内容放到 `work\mmdplugin\dev`，或用环境变量 `AINAKAWARI_SDK` 传位置）。ini 参照 `mmd_plugin\MMD-AINakawari.ini.example`
+  - **中文版**：`tools\zh_patch\build_dll.cmd` 会自动用本地 SDK 编译（含 WndProc 签名修正）
+- 构建 MMM 的按钮・面板：`dotnet build mmm_plugin\MMM-AINakawari.csproj -c Release -p:MmmDir=<MMM 文件夹>\`（需要 .NET SDK）。ini 参照 `mmm_plugin\MMM-AINakawari.ini.example`。桥按 [mmm-mcp](https://github.com/BeamManP/mmm-mcp) 的 README 组装
+- 制作分发 zip：`python tools\release\build_release.py --mmdplugin <MMDPlugin_v0.41_x64.zip> --mmm-mcp <mmm-mcp 仓库>`（参考 mmm-mcp 旁边的 `MikuMikuMoving64\` 组装。产物在 `work\release\`）
+
+## 开发记录
+原理・踩过的坑・实测数据汇总在 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
