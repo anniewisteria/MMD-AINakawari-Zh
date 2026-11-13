@@ -349,7 +349,7 @@ class SetupWindow:
             self._show_form(self.expanded or not used)
             self.start_btn.configure(text=tr("この場所を使う") if not used else tr("点検して直す"), state="normal")
             return
-        cut = "（" if self.lang == "ja" else " ("   # 段の名前の「（補足）」を落とす  # i18n: skip
+        cut = "（"   # 段の見出しは常に日本語の全角「（」で書かれている（中文版同）。# i18n: skip
         names = tr("・").join(title.split(cut)[0] for _k, title, _gb in pending[:4]) + (tr("…") if len(pending) > 4 else "")
         if kind == "update":
             self.headline.set(tr("更新があります（{n} 手順・約 {need:.0f}GB）", n=len(pending), need=need))

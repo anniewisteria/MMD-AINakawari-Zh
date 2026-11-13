@@ -1,0 +1,567 @@
+"""開いている MMD とのやり取り（mmd-mcp の中の関数を直接使う）。"""
+import os
+
+from mmd_mcp import bone_state
+from mmd_mcp import edit_actions
+from mmd_mcp import file_operations as files
+from mmd_mcp import playback
+from mmd_mcp import scene_controls as scene
+from mmd_mcp import timeline
+from mmd_mcp.bone_controls import get_selected_bone_transform
+from mmd_mcp.bone_selection import select_bone
+from mmd_mcp import ui_language as _ui_language
+from mmd_mcp.ui_state import UIReader, get_ui_state
+from mmd_mcp.windows import list_windows
+
+from . import mmd_memory, vmd, zh_compat
+from .i18n import _
+
+# MMD の中のモデルのデータでの、読み込んだファイルの場所（UTF-16・256 文字）。
+# MMDPlugin のヘッダ（MMDModelData::file_path・9.31 の解析）の位置で、9.32 でもそのまま読めた（11-03）。
+MODEL_FILE_PATH = 9544
+
+# 範囲選択の対象の、英語モード（ヘルプ → English Mode）での名前（11-11 に MMD 9.32 で並びの位置を突き合わせて読んだ）。
+# 中では日本語の名前で扱い、MMD に渡す時だけ替える（_track）
+TRACKS_EN = {"全ﾌﾚｰﾑ": "All frame", "全ボーンﾌﾚｰﾑ": "All bone", "全表情ﾌﾚｰﾑ": "All facial"}   # i18n: skip
+
+
+class MMDLink:
+    def __init__(self, hwnd=None):
+        self._hwnd = hwnd
+
+    @property
+    def hwnd(self):
+        if self._hwnd:
+            return self._hwnd
+        wins = [w.public_info() for w in list_windows()]
+        if not wins:
+            raise RuntimeError(_("MMD が起動していません"))
+        if len(wins) > 1:
+            raise RuntimeError(_("MMD が {count} 個起動しています。1 つにしてください", count=len(wins)))
+        return wins[0]["hwnd"]
+
+    @property
+    def key(self):
+        """相手の MMD の見分け（プロセス番号と起動時刻。MMD を開き直すと変わる）。"""
+        hwnd = self.hwnd
+        wins = [w for w in list_windows() if w.hwnd == hwnd]
+        if not wins:
+            raise RuntimeError(_("MMD が閉じられました"))
+        return f"{wins[0].pid}-{wins[0].process_started:.0f}"
+
+    def state(self):
+        s = get_ui_state(self.hwnd)
+        return {"frame": s["displayed_frame"]["value"], "model": s["model_selector"]["selected_name"],
+                "model_selected": not s["model_selector"]["camera_light_accessory_selected"]}
+
+    def selected_model(self):
+        """MMD で選択中のモデルの名前と、読み込んだファイルの場所。モデル以外が選ばれていれば None。
+
+        MMD のメモリを読むので、mmd-mcp と同じく検証済みの MMD 9.32 x64 の実行ファイルでだけ動く。
+        画面のモデル欄の名前とメモリの名前を突き合わせ、合わなければ止める。
+        """
+        hwnd = self.hwnd
+        _hwnd, selector_index, name = UIReader(hwnd).anchor()  # モデル欄だけ読む（get_ui_state は全部読むので 0.6 秒かかる）
+        if selector_index <= 0:  # 0 はカメラ・照明・アクセサリ
+            return None
+        target = next((w for w in list_windows() if w.hwnd == hwnd), None)
+        if target is None:
+            raise RuntimeError(_("MMD が閉じられました"))
+        memory = bone_state.BoneMemory(target)
+        try:
+            main = memory.pointer(memory.base + bone_state.MAIN_POINTER_RVA)
+            slot = memory.integer(main + bone_state.SELECTED_MODEL)
+            if not 0 <= slot < 255:
+                return None
+            model = memory.pointer(main + bone_state.MODEL_TABLE + slot * 8)
+            if not model:
+                return None
+            names = {bone_state.decode_name(memory.read(model + offset, 50))
+                     for offset in (bone_state.MODEL_NAME_JA, bone_state.MODEL_NAME_EN)}
+            path = memory.read(model + MODEL_FILE_PATH, 512).decode("utf-16-le", errors="replace").split("\0", 1)[0]
+        finally:
+            memory.close()
+        if name not in names:
+            raise RuntimeError(_("MMD のモデル欄（{name}）と中のモデルが合いません。もう一度選び直してください", name=name))
+        return {"name": name, "path": path}
+
+    def current_frame(self):
+        """MMD で今いるフレーム（タイムラインの上の現在フレームの欄）。読めなければ None。"""
+        text = UIReader(self.hwnd).edit(417)
+        return int(text) if text and text.strip().isdigit() else None
+
+    def selected_key_frames(self):
+        """タイムラインで選んでいるボーンのキーのフレーム（昇順）。選んでいなければ空。
+
+        「選んだキーの間」の範囲に使う。前は MMD の範囲選択の欄（タイムラインの下の開始〜終了フレーム）を読んでいたが、
+        場所が分かりにくく、キーを選ぶ方が MMD の操作として自然なので替えた（11-04 マスター）。
+        """
+        return self.key_scan()[0]
+
+    def key_scan(self, with_names=False):
+        """(選んでいるキーのフレーム, 骨の名前 → キーのフレーム。with_names が False なら None)。mmd_memory.MotionReader.scan。"""
+        reader = mmd_memory.MotionReader(self.hwnd)
+        try:
+            return reader.scan(with_names)
+        finally:
+            reader.close()
+
+    def read_motion(self, path):
+        """選択中のモデルのモーションを MMD のメモリから読み、VMD にして path に書く（「元に戻す」の控え）。読んだ vmd.Motion を返す。
+
+        中身は MMD の書き出しと同じ（11-04、体のキー 2317・表情 69・表示/IK を突き合わせて一致。補間の各行の末尾の詰め物だけ違う）。
+        書き出しのダイアログ（2.3 秒）と違って 0.06 秒で、0F にキーが無くてもフレームが詰まらない。
+        """
+        model = self.selected_model()
+        if model is None:
+            raise RuntimeError(_("MMD でモデルを選んでください"))
+        morphs, iks = mmd_memory.read_pmx_names(model["path"])
+        reader = mmd_memory.MotionReader(self.hwnd)
+        try:
+            motion = reader.read(morphs, iks)
+        finally:
+            reader.close()
+        vmd.write(path, motion)
+        return motion
+
+    def export_motion(self, path):
+        """選択中のモデルのモーションを丸ごと書き出す。MMD は選択したキーだけを書き出す（何も選んでいないと断る）ので、先に全部選ぶ。"""
+        r = timeline.select_range(0, 999999, self._track("全ﾌﾚｰﾑ"), self.hwnd)   # i18n: skip
+        if r.get("status") != "completed":
+            raise RuntimeError(_("MMD で全部のキーを選択できませんでした: {status} {dialogs}", status=r.get("status"), dialogs=r.get("dialogs", "")))
+        r = files.export_file("motion", path, True, self.hwnd)
+        if r.get("status") != "completed":
+            raise RuntimeError(_("MMD からモーションを書き出せませんでした: {status} {dialogs}", status=r.get("status"), dialogs=r.get("dialogs", "")))
+
+    def check_model(self, model):
+        """選ばれているモデルが model（PMX の場所）でなければ止める。キーを消す前・控えを取る前に呼ぶ。"""
+        selected = self.selected_model()
+        if selected is None or os.path.normcase(os.path.abspath(selected["path"])) != os.path.normcase(os.path.abspath(model)):
+            now = selected["name"] if selected else _("モデル以外")
+            raise RuntimeError(_("始めた時と違うモデル（{now}）が選ばれています。キーは消していません。"
+                                 "「{name}」を選んでから、もう一度押してください",
+                                 now=now, name=os.path.splitext(os.path.basename(model))[0]))
+
+    def load_motion(self, path, frame=0, model=None, restore=None):
+        """選択中のモデルのモーションを、VMD の中身でまるごと置き換える。
+
+        MMD の読み込みは足し込み（ファイルにあるキーだけ上書きし、他のキーは残す）なので、先にボーンと表情のキーを全部消す。
+        「表示･IK･外親」の行は消さない（外部親は VMD に入らないので、消すと戻らない。11-09）。
+        読み込みは今のフレームの分ずれるので frame（ふつう 0）へ移ってから読む。
+        model: 読み込む先のモデルの PMX の場所。キーを消す直前に、選ばれているモデルがこれかを確かめ、違えば何も消さずに止める
+               （生成の途中で別のモデルを選ぶと、そのモデルのキーを全部消して前のモデルの動きを入れていた。11-07 Codex のレビュー）。
+        restore: キーを消した後で読み込みに失敗した時に、読み込み直すバックアップ（消したキーを戻す）。
+        キーを消すのに使うタイムラインの範囲選択の欄（対象・開始〜終了）は、終わったら押す前の入力に戻す（_range_ui）。
+        """
+        # 再生中は MMD の場面を編集できない（mmd-mcp が断る）。生成した動きを再生して確かめている途中で「元に戻す」や
+        # 「生成」を押すことがあるので、先に止める（11-04 マスター「元に戻すを押すとたまに Stop MMD playback が出る」）
+        if playback.get(self.hwnd)["playing"]:
+            playback.set_playback(False, hwnd=self.hwnd)
+        saved = self._range_ui()
+        try:
+            self._replace_motion(path, frame, model, restore)
+        finally:
+            if saved:
+                self._restore_range_ui(saved)
+
+    def _range_ui(self):
+        """タイムラインの下の範囲選択の欄の今の入力（対象の名前・開始・終了の文字）。読めなければ None（戻さないだけ）。"""
+        try:
+            ctx = timeline.get_context(self.hwnd)
+            return ctx["range_tracks"]["selected_name"], ctx["range_start_text"], ctx["range_end_text"]
+        except Exception as e:
+            from . import applog
+            applog.write(f"範囲選択の欄を読めませんでした（終わった後に戻しません）: {type(e).__name__}: {e}")
+            return None
+
+    def _restore_range_ui(self, saved):
+        """範囲選択の欄を saved（_range_ui）の入力に戻す（11-11 マスター。キーを消すたびに「全表情ﾌﾚｰﾑ 0〜999999」になっていた）。
+        「範囲選択」のボタンは押さない（キーの選択はそのまま）。対象は名前で探す（並びはモデルで変わる）。無ければ対象はそのまま。
+        対象は MMD に選び直したと知らせる（mmd-mcp の select_range と同じ。知らせないと、見た目だけ戻って MMD の中は全表情のまま）。
+        戻せなくても生成は失敗にしない（記録にだけ残す）。"""
+        import ctypes
+
+        from mmd_mcp.bone_controls import _message
+        name, start, end = saved
+        try:
+            reader = UIReader(self.hwnd)
+            tracks = reader.combo(434)
+            if name and tracks and tracks["items"].count(name) == 1 and tracks["selected_name"] != name:
+                combo = reader.control(434, "ComboBox")
+                index = tracks["items"].index(name)
+                _message(combo, 0x14E, index)   # CB_SETCURSEL
+                _message(self.hwnd, 0x111, 434 | (1 << 16), combo)   # WM_COMMAND・CBN_SELCHANGE
+            for cid, text in ((425, start), (426, end)):
+                edit = reader.control(cid, "Edit")
+                if text is not None and reader.text(edit) != text:
+                    buffer = ctypes.create_unicode_buffer(text)
+                    _message(edit, 0xC, 0, ctypes.addressof(buffer))   # WM_SETTEXT
+        except Exception as e:
+            from . import applog
+            applog.write(f"範囲選択の欄を戻せませんでした（{saved}）: {type(e).__name__}: {e}")
+
+    def _replace_motion(self, path, frame, model, restore):
+        """load_motion の中身（キーを消して読み込む）。"""
+        if not self.state()["model_selected"]:
+            raise RuntimeError(_("MMD でカメラ・照明・アクセサリが選ばれています。モデルを選んでからもう一度押してください"))
+        if model is not None:
+            self.check_model(model)
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):   # 消す前に確かめる
+            raise RuntimeError(_("読み込むファイルがありません。キーは消していません: {path}", path=path))
+        # 読み込むフレームへは、消す前に移る（消した後で移れずに止まると、戻しが走らずキーが消えたままになっていた。11-07）
+        self.set_frame(frame)
+        # 消すのはボーンと表情の行だけ。「全ﾌﾚｰﾑ」で消すと「表示･IK･外親」の行も消え、外部親の設定が全部外れる
+        # （VMD には外部親の欄が無いので、読み込み直しても戻らない）。表示/IK のキーは残し、VMD の同じキーで上書きされる
+        # （11-09 第一動作報告「ナカワリを使うと既存の外部親が全部解除される」。Tda式ミク＋ダミーボーンで再現・切り分けた）
+        r = self._delete_keys("全ボーンﾌﾚｰﾑ", _("ボーンのキーを消す時"))   # i18n: skip
+        if r.get("status") != "completed" and not r.get("delete_sent"):   # 消す操作を送る前に止まった（キーは消えていない）
+            notices = r["dismissed"] if "dismissed" in r else self._dismiss_notices(r)
+            why = _("・").join(notices) or f"{r.get('status')} {r.get('dialogs', '')}".strip()
+            raise RuntimeError(_("MMD で今のキーを消せませんでした（{stage}: {why}）。キーは消していません", stage=r.get("stage", ""), why=why))
+        try:   # ボーンを消す操作を送った後は、何で止まっても下の戻しを通す（表情を消せなかった時も）
+            if r.get("status") == "completed":
+                r = self._delete_keys("全表情ﾌﾚｰﾑ", _("表情のキーを消す時"))   # i18n: skip
+            if r.get("status") == "completed" and self.current_frame() != frame:
+                self.set_frame(frame)
+        except Exception as e:
+            r = {"status": type(e).__name__, "dialogs": str(e)}
+        if r.get("status") == "completed":
+            r = self._load_vmd(path)
+        if r.get("status") != "completed":
+            # MMD が「このファイルは Vocaloid Motion Data file ではありません」などの窓を出していると、閉じるまで操作できず、
+            # 戻しの読み込みも止まる（11-07 本物の MMD で、壊れた VMD を読ませて確かめた）。ボタン 1 つのお知らせの窓だけ閉じる
+            # （_settle で閉じた後なら、閉じた窓の文を使う。閉じた窓にもう一度送ると、無い窓への送信で落ちる）
+            notices = r["dismissed"] if "dismissed" in r else self._dismiss_notices(r)
+            why = _("・").join(notices) or f"{r.get('status')} {r.get('dialogs', '')}".strip()
+            if r.get("stage"):
+                why = f"{r['stage']}: {why}"
+            if restore is None:
+                raise RuntimeError(_("MMD にモーションを読み込めませんでした: {why}", why=why))
+            try:
+                self.set_frame(frame)
+            except Exception as e:
+                back = {"status": type(e).__name__, "dialogs": str(e)}
+            else:
+                back = self._load_vmd(os.path.abspath(restore))
+            if back.get("status") == "completed":
+                raise RuntimeError(_("MMD にモーションを読み込めませんでした（{why}）。消したキーは、バックアップから戻しました", why=why))
+            raise RuntimeError(_("MMD にモーションを読み込めず（{why}）、バックアップも読み込めませんでした。"
+                                 "MMD の「ファイル」→「モーションデータ読込」で、次のファイルを読み込んでください: {path}",
+                                 why=why, path=os.path.abspath(restore)))
+
+    @staticmethod
+    def _dismiss_notices(result, timeout=3.0):
+        """mmd-mcp の返事（dialog_requires_action）にある、ボタンが 1 つだけのお知らせの窓を閉じて、その文を返す。ほかの窓は触らない。"""
+        import time
+
+        import win32gui
+        texts, closing = [], []
+        for d in result.get("dialogs") or []:
+            if not isinstance(d, dict):
+                continue
+            controls = d.get("controls") or []
+            buttons = [c for c in controls if c.get("class") == "Button"]
+            if len(buttons) != 1 or any(c.get("class") == "Edit" for c in controls):
+                continue
+            texts += [c["text"] for c in controls if c.get("class") == "Static" and c.get("text")]
+            win32gui.PostMessage(buttons[0]["hwnd"], 0xF5, 0, 0)   # BM_CLICK
+            closing.append(d["hwnd"])
+        deadline = time.monotonic() + timeout
+        while closing and time.monotonic() < deadline:
+            closing = [h for h in closing if win32gui.IsWindow(h) and win32gui.IsWindowVisible(h)]
+            time.sleep(0.1)
+        return texts
+
+    def _delete_keys(self, track, stage):
+        """タイムラインの範囲選択で track（「全ボーンﾌﾚｰﾑ」など）の 0〜999999F を選んで消す。mmd-mcp の返事を返す。
+        消す操作を送ったら、返事に delete_sent を付ける（その後で止まったら、キーが一部消えているかもしれないので戻しを通す）。"""
+        r = timeline.select_range(0, 999999, self._track(track), self.hwnd)
+        # 選ぶだけの段では中身を確かめようがないので、お知らせの窓だけなら閉じて先へ進む（消えたかは下で確かめる）
+        r = self._settle(r, _("{stage}（範囲選択）", stage=stage), lambda: True)
+        if r.get("status") != "completed":
+            return r
+        r = edit_actions.perform(["delete_keys"], self.hwnd)
+        r = self._settle(r, stage, lambda: self._keys_cleared(track))
+        return {**r, "delete_sent": True}
+
+    def english(self):
+        """MMD が英語モードか。中文版：MMDZh 汉化后按钮是「模型编辑/相机编辑」，
+        zh_compat 已把 english_mode 换成中文感知版（中文一律按非英语处理，认不出也不抛异常）。
+        用模块属性动态取，避免绑定到补丁前的旧函数。"""
+        try:
+            return _ui_language.english_mode(UIReader(self.hwnd))
+        except Exception:
+            return False
+
+    def language(self):
+        """窓に出す言葉（i18n.py）。中文版固定 "zh"。
+
+        注意：界面语言与「按什么文字找 MMD 控件」是两件事。这里返回 zh 让窗口/日志出中文；
+        english() 仍返回 False，配合 zh_compat 注入的中文变体去命中控件。
+        """
+        return "zh"
+
+    def _track(self, track):
+        """範囲選択の対象の日本語の名前を、今の MMD の言葉の名前にする。
+
+        中文版改为「读取组合框 434 里实际存在的项」：日文原版是「全ﾌﾚｰﾑ」等，
+        英语模式是 All frame 等，MMDZh 汉化后是「全部帧 / 全部骨骼帧 / 全部表情帧」。
+        这样同一个插件在三种 MMD 上都能用，不依赖「当前是不是中文」的判断。
+        """
+        candidates = [track, TRACKS_EN.get(track), zh_compat.TRACKS_ZH.get(track)]
+        try:
+            items = UIReader(self.hwnd).combo(434)
+            if items and items.get("items"):
+                for name in candidates:
+                    if name and items["items"].count(name) == 1:
+                        return name
+        except Exception:
+            pass
+        # 读不到组合框时按 MMD 模式猜（补丁前的兜底）
+        return TRACKS_EN[track] if self.english() else zh_compat.TRACKS_ZH.get(track, track)
+
+    def _settle(self, result, stage, verify):
+        """mmd-mcp の返事が MMD の窓で止まっていたら、その窓をログに残し、ボタン 1 つのお知らせの窓だけ閉じる。
+        閉じた後で verify()（その段が済んだかを MMD の中身で確かめる）が通れば、済んだ（completed）の返事にする。
+
+        11-11 動作報告: MMD 9.32 にプラグイン（MMPlus・メディア拡張・MMDModern・qExternalParentControlExtend）を入れた PC で、
+        AIナカワリ から読み込む時だけ「不足しているボーン／モーフはありません。」の窓が出て、読み込めているのに失敗にしていた
+        （手で同じ VMD を読むと出ない。どのプラグインの窓か、どの段で出るかは未特定）。段をログに残すのは、次に分かるようにするため。
+        """
+        if result.get("status") != "dialog_requires_action":
+            return result
+        from . import applog
+        applog.write(f"{stage}に MMD の窓が出ました: {self._describe_dialogs(result.get('dialogs'))}")
+        notices = self._dismiss_notices(result)
+        result = {**result, "stage": stage, "dismissed": notices}
+        dialogs = [d for d in result.get("dialogs") or [] if isinstance(d, dict)]
+        if not dialogs or self._still_open(dialogs):
+            return result   # お知らせでない窓（またはまだ閉じない窓）がある。押さずに止める
+        try:
+            done = verify()
+        except Exception as e:
+            applog.write(f"  {stage}が済んだかを確かめられませんでした: {type(e).__name__}: {e}")
+            return result
+        if not done:
+            applog.write(f"  お知らせの窓は閉じましたが、{stage}は済んでいませんでした")
+            return result
+        applog.write(f"  お知らせの窓として閉じ、{stage}は済んでいると MMD の中身で確かめました")
+        return {"status": "completed", "stage": stage, "dismissed": notices}
+
+    @staticmethod
+    def _still_open(dialogs):
+        """dialogs のうち、まだ開いている窓があるか（ボタン 1 つでない窓は _dismiss_notices が閉じないので残る）。"""
+        import win32gui
+        return any(win32gui.IsWindow(d["hwnd"]) and win32gui.IsWindowVisible(d["hwnd"]) for d in dialogs if d.get("hwnd"))
+
+    @staticmethod
+    def _describe_dialogs(dialogs):
+        """ログ用: 窓ごとに「タイトル」・中の文・ボタンの文。"""
+        if not isinstance(dialogs, list):
+            return str(dialogs)
+        out = []
+        for d in dialogs:
+            if not isinstance(d, dict):
+                out.append(str(d))
+                continue
+            controls = d.get("controls") or []
+            texts = [c.get("text") for c in controls if c.get("class") == "Static" and c.get("text")]
+            buttons = [c.get("text") for c in controls if c.get("class") == "Button"]
+            out.append(f"「{d.get('title', '')}」 文: {' / '.join(texts)} ボタン: {' / '.join(b or '' for b in buttons)}")   # i18n: skip
+        return "、".join(out) or "（窓の中身を読めず）"   # i18n: skip
+
+    def _keys_cleared(self, track, wait=5.0):
+        """track（「全ボーンﾌﾚｰﾑ」「全表情ﾌﾚｰﾑ」）のキーが 0F の分を残して消えたかを、MMD のメモリで確かめる。
+        0F のキーは MMD が消さないので数えない。消す途中かもしれないので wait 秒までくり返し見る。"""
+        import struct
+        import time
+        model = self.selected_model()
+        if model is None:
+            return False
+        morphs, iks = mmd_memory.read_pmx_names(model["path"])
+        deadline = time.monotonic() + wait
+        while True:
+            reader = mmd_memory.MotionReader(self.hwnd)
+            try:
+                motion = reader.read(morphs, iks)
+            finally:
+                reader.close()
+            if track == "全ボーンﾌﾚｰﾑ":   # i18n: skip
+                left = any(k.frame > 0 for k in motion.bones)
+            else:   # tail の先頭は表情のキー: 件数（4 バイト）と、名前 15・フレーム 4・値 4 の 23 バイトの行
+                n = struct.unpack_from("<I", motion.tail, 0)[0]
+                left = any(struct.unpack_from("<I", motion.tail, 4 + i * 23 + 15)[0] > 0 for i in range(n))
+            if not left:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.3)
+
+    def _load_vmd(self, path):
+        """mmd-mcp で VMD を読み込む。例外（ファイルが無い・MMD の画面が読めないなど）も失敗の返事にする（キーを消した後の戻しを通すため）。
+        モデル名が長いと出る「〜用のモーションデータです 続行しますか？」は OK で進める（_accept_other_model）。"""
+        try:
+            r = files.load_file("motion", path, self.hwnd)
+        except Exception as e:
+            # mmd-mcp は、パスを送った後に閉じかけのファイルの窓を調べて落ちることがある（GetParent の 1400。11-10 に
+            # 長い名前の確認の窓が出る時に 5 回中 1 回）。その時は確認の窓が出ていれば、そこから続ける
+            r = self._confirm_after_error(e)
+            if r is None:
+                # 確認の窓も出ていない。パスは送った後なので、読み込みそのものは済んでいることが多い（11-10 に検証用の MMD で、
+                # ふつうの名前のモデルでも数十回に 1〜2 回。前は失敗と見て、バックアップを重ねて読み込み、エラーの窓を出していた）。
+                # MMD の中身を見て、ファイルのキーが全部入っていれば読み込めている
+                if self._loaded_after_error(path):
+                    from . import applog
+                    applog.write(f"mmd-mcp の読み込みが例外で返りましたが、MMD にはファイルのキーが入っていました（読み込めたと見ます）: {e}")
+                    return {"status": "completed", "path_submitted": True, "verified_after_error": str(e)}
+                return {"status": type(e).__name__, "dialogs": str(e)}
+        if r.get("status") == "dialog_requires_action" and r.get("path_submitted"):
+            r = self._accept_other_model(r)
+        if r.get("status") == "dialog_requires_action":
+            # パスを送った後なら、読み込めたかを MMD の中身で確かめる。送る前（ファイルの窓より先に窓が出た）なら読み込んでいない
+            r = self._settle(r, _("モーションを読み込む時"),
+                             lambda: bool(r.get("path_submitted")) and self._loaded_after_error(path))
+        return r
+
+    def _confirm_after_error(self, error, wait=3.0):
+        """load_file が例外で返った時に、MMD に確認の窓が出ていれば、それを dialog_requires_action の返事の形にする。無ければ None。"""
+        import time
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            try:
+                targets = [w for w in list_windows() if w.hwnd == self.hwnd]
+                dialogs = files.owned_dialogs(targets[0]) if len(targets) == 1 else []
+            except Exception:
+                dialogs = []
+            if dialogs:
+                return {"status": "dialog_requires_action", "path_submitted": True, "dialogs": dialogs, "error": str(error)}
+            time.sleep(0.1)
+        return None
+
+    def _loaded_after_error(self, path, wait=10.0):
+        """load_file が例外で返り、確認の窓も出ていない時に、読み込みが実は済んでいるかを MMD のメモリで確かめる。
+
+        読み込む前にボーンのキーを全部消している（load_motion）ので、ファイルのボーンのキー（骨・フレーム）が MMD に全部あれば、
+        読み込めている。読み込めていなければ、MMD に残っているのは消せない 0F のキーだけなので、0F より後ろのキーが見つからない。
+        読み込みの途中かもしれないので、wait 秒までくり返し見る。0F のキーしか無いファイルは見分けられないので False。
+        """
+        import time
+
+        try:
+            want = {(k.name, k.frame) for k in vmd.read(path).bones}
+        except Exception:
+            return False
+        if not any(frame > 0 for _name, frame in want):
+            return False
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            try:
+                model = self.selected_model()
+                morphs, iks = mmd_memory.read_pmx_names(model["path"])
+                reader = mmd_memory.MotionReader(self.hwnd)
+                try:
+                    got = {(k.name, k.frame) for k in reader.read(morphs, iks).bones}
+                finally:
+                    reader.close()
+                if want <= got:
+                    return True
+            except Exception:   # 読み込みの途中・窓が出入りしている。次でまた見る
+                pass
+            time.sleep(0.3)
+        return False
+
+    def _accept_other_model(self, result, timeout=60.0):
+        """VMD の読み込みで「このファイルは ○○ 用のモーションデータです／同じボーン名のモーションのみを取り込む事になります／
+        続行しますか？」（OK・キャンセル）が出た時だけ、OK を押して読み込みが終わるまで待つ。それ以外の窓なら result をそのまま返す。
+
+        VMD のモデル名は 20 バイト（cp932）までなので、名前の長いモデルは MMD が書き出した VMD でも名前が合わず、毎回この確認が出る
+        （11-10 動作報告。名前を 52 バイトにした Tda式ミクで再現）。読み込むのは、選んでいるモデルから書き出して作った VMD
+        （load_motion の前に check_model で確かめている）なので、OK でよい。ボーン名で取り込むのは、名前が合う時と同じ。
+        """
+        import time
+
+        import pywintypes
+        import win32gui
+
+        def confirm(d):
+            """その窓が「〜用のモーションデータです 続行しますか？」なら (OK のボタン, 文)。違えば None。"""
+            # 英語モード（11-11 に MMD 9.32 で出して読んだ）: 「load motion data」
+            # 「This motion file is the data for '○○'. / You can regist the motion only same bone name. / Are you OK?」
+            if d.get("title") not in zh_compat.TITLE_LOAD_MOTION_ZH:   # i18n: skip
+                return None
+            controls = d.get("controls") or []
+            texts = [c.get("text") or "" for c in controls if c.get("class") == "Static"]
+            ok = [c for c in controls if c.get("class") == "Button" and c.get("id") == 1]
+            # 中文版（MMDZh 把整句翻成「此文件是供 ○○ 使用的动作数据…要继续吗？」）
+            zh_ok = any(any(word in t for word in zh_compat.ACCEPT_OTHER_MODEL_ZH) for t in texts)
+            if len(ok) != 1 or not (zh_ok
+                                    or any(("用のモーションデータです" in t and "続行しますか" in t)   # i18n: skip
+                                           or ("This motion file is the data for" in t and "Are you OK?" in t) for t in texts)):
+                return None
+            return ok[0]["hwnd"], texts
+
+        dialogs = [d for d in result.get("dialogs") or [] if isinstance(d, dict)]
+        if len(dialogs) != 1 or confirm(dialogs[0]) is None:
+            return result
+        # UIReader は確認の窓が開いていると作れない（「modal dialog open」）ので、list_windows から取る
+        targets = [w for w in list_windows() if w.hwnd == self.hwnd]
+        if len(targets) != 1:
+            return result
+        target, texts, pressed = targets[0], confirm(dialogs[0])[1], set()
+        deadline, quiet = time.monotonic() + timeout, None
+        # 窓は毎回取り直す。窓が出入りする途中で Windows の関数が失敗することがある（11-10 に 1 回、OK を押す前に落ちた）ので、
+        # 失敗したらその回は飛ばして次で取り直す
+        while time.monotonic() < deadline:
+            try:
+                now = files.owned_dialogs(target)
+                others = [d for d in now if confirm(d) is None]
+                if others:   # 別の窓が出た（ほかの窓は押さない）
+                    return {"status": "dialog_requires_action", "path_submitted": True, "dialogs": others}
+                waiting = [d for d in now if d["hwnd"] not in pressed]
+                for d in waiting:
+                    win32gui.PostMessage(confirm(d)[0], 0xF5, 0, 0)   # BM_CLICK
+                    pressed.add(d["hwnd"])
+                if now or not win32gui.IsWindowEnabled(self.hwnd):   # 窓が消えるのを待つ・読み込み中
+                    quiet = None
+                else:
+                    get_ui_state(self.hwnd)
+                    quiet = quiet or time.monotonic()
+                    if time.monotonic() - quiet >= 0.3:
+                        return {"status": "completed", "path_submitted": True, "accepted": texts}
+            except (pywintypes.error, ValueError, RuntimeError):
+                quiet = None
+            time.sleep(0.1)
+        return {"status": "timeout", "path_submitted": True, "note": _("OK を押した後、読み込みが終わりませんでした")}
+
+    def set_frame(self, frame, tries=3, wait=0.5):
+        """MMD の今のフレームを frame にする。
+
+        mmd-mcp はフレームの欄に数字を入れてすぐ読み直し、数字とモデルの欄が合わないと止める。モーションを読み込んだ直後は
+        MMD が忙しく、合わないことがある（11-07 マスター。生成の最後で「MMD did not display the requested frame in the same
+        model context.」）。合わない時（RuntimeError）だけ、少し待ってやり直す。再生中などの止め（ValueError）はそのまま上げる。
+        """
+        import time
+        for i in range(tries):
+            try:
+                return scene.set_frame(frame, self.hwnd)
+            except RuntimeError:
+                if i == tries - 1:
+                    raise
+                time.sleep(wait)
+
+    def return_to(self, frame):
+        """押した時のフレームへ戻す。動きはもう入っているので、戻せなくても止めない。戻せなかった時は理由の文を返す。"""
+        try:
+            self.set_frame(frame)
+        except Exception as e:
+            return str(e)
+        return None
+
+    def bone_value(self, name, frame):
+        """あるフレームでの骨の表示値（位置 x,y,z・回転の度）。骨の選択が変わる。"""
+        self.set_frame(frame)
+        select_bone(name, None, self.hwnd)
+        t = get_selected_bone_transform(self.hwnd)
+        p = t["position"]
+        return (p["x"], p["y"], p["z"])

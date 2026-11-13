@@ -95,8 +95,8 @@ class MMMLink:
         return active
 
     def language(self):
-        """窓に出す言葉（i18n.py）。MMM の英語の画面はまだ見分けないので日本語（11-11。MMD の英語モードだけ対応）。"""
-        return "ja"
+        """窓に出す言葉（i18n.py）。中文版固定中文（MMM 版界面同样中文化）。"""
+        return "zh"
 
     @property
     def key(self):

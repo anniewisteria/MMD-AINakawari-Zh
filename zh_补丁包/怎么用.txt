@@ -1,0 +1,66 @@
+AI中割 中文版补丁包（MMDZh 汉化 MMD 专用）
+==========================================
+
+这个文件夹里的 12 个文件 + 1 个 DLL，就是全部中文改动。
+作者更新 AI 插件后，把这里的东西按原路径拖进插件文件夹覆盖即可。
+
+一键部署（推荐，2026-11-13 新增）
+--------------------------------
+把整个补丁包文件夹放到 MikuMikuDance.exe 的同一目录，
+双击「一键部署中文版.bat」即可：自动备份原版、复制 12 个中文文件、替换 DLL、
+验收并报告结果。没装原版 AI 插件时会直接提示、不做任何改动。
+
+手动拖拽（和上面等效，二选一）
+------------------------------------------
+1. 关闭 MMD。
+
+2. 把本文件夹里的 app 整个文件夹拖到  MMD-AINakawari  文件夹里，
+   选「替换目标中的文件」（就是合并覆盖）。
+
+   拖完之后应该变成这样（对照一下）：
+
+   MikuMikuDanceE_v932x64\MMD-AINakawari\app\mmd_ainakawari\zh_compat.py
+   MikuMikuDanceE_v932x64\MMD-AINakawari\app\mmd_ainakawari\texts\zh_all.py
+   ……（其余文件同理，都在 app\ 下对应位置）
+
+3. 把本文件夹里的 MMD-AINakawari.dll 复制到
+
+   MikuMikuDanceE_v932x64\Plugin\MMD-AINakawari\MMD-AINakawari.dll
+
+   （覆盖同名文件。如果 Plugin 文件夹下没有 MMD-AINakawari 这个子文件夹，
+   说明 AI 插件本体还没装，先去装发行版 zip。）
+
+4. 开 MMD。菜单栏「帮助」右边出现「AI中割」、右下角出现中文面板就成功了。
+
+注意
+----
+* 只复制这 12 个文件，别把整个旧版 mmd_ainakawari 文件夹拖过去整夹覆盖 ——
+  作者出新版后整夹覆盖会把新版降级。本包只含改过的文件，怎么拖都不会盖坏。
+* 本包对应 AI 插件 0.6.0。作者出了更新的版本后：先正常安装新版 zip，
+  再把本包拖进去覆盖；如果新的界面冒出个别日文句子，属于翻译表没收录，
+  不影响使用，可以找我补。
+* 想撤销中文：把同名文件的 .orig 备份（第一次覆盖时生成）改回原名即可。
+
+插件本体（原版）的完整中文说明看这里
+------------------------------------
+* README_Zh.md ← 作者日文 README 的全文翻译：
+  安装步骤、界面每个栏目是什么、出好动作的窍门、故障排查、已知限制、许可。
+  看不懂日文说明时查这份就够。
+
+文件清单（12 个 .py/.txt + 1 个 DLL）
+------------------------------------
+app\mmd_ainakawari\__init__.py        自动挂载中文补丁
+app\mmd_ainakawari\i18n.py            加 zh 语言、默认中文
+app\mmd_ainakawari\zh_compat.py       让插件认识汉化 MMD 的中文控件
+app\mmd_ainakawari\mmd_link.py        范围选择/确认框兼容中文 + 界面语言中文
+app\mmd_ainakawari\mmm_link.py        MMM 版界面语言中文
+app\mmd_ainakawari\app.py             主窗口中文
+app\mmd_ainakawari\panel.py           右下角面板按钮中文
+app\mmd_ainakawari\samples.py         示例列表
+app\mmd_ainakawari\prompt_samples.txt 示例提示词中文（英文 prompt 保留）
+app\mmd_ainakawari\installer\window.py 安装设置窗口中文
+app\mmd_ainakawari\texts\zh_all.py    453 条中文翻译表
+app\tools\install_plugin.py           导入脚本中文提示
+MMD-AINakawari.dll                    中文菜单/面板（已编译好，2026-11-13 第二版：
+                                      修复重开工程后右下角面板变黑块、要鼠标划过才恢复的问题）
+一键部署中文版.bat                    一键部署工具（放 MMD 同目录双击）

@@ -77,12 +77,16 @@ NO_MODEL = N_("AI のモデルがまだ入っていません。下の「セッ�
 
 
 def language(host):
-    """その MMD（MMM）の言葉。MMD が英語モード（ヘルプ → English Mode）なら "en"。読めなければ日本語（11-11 マスター）。"""
+    """その MMD（MMM）の言葉。中文版固定 "zh"。
+
+    原版靠「MMD 是否 English Mode」在 ja / en 间切换；中文版不需要这个判断，
+    固定中文即可（MMDLink.language() 也已返回 "zh"）。読めない時も中文。
+    """
     try:
         return host.link().language()
     except Exception:
         applog.exception("MMD の言葉（英語モードか）を読めませんでした:")
-        return "ja"
+        return "zh"
 
 def front_mmd():
     """一番手前の MMD か MMM（MikuMikuMoving）の窓。無ければ None（hosts.front）。"""
@@ -201,8 +205,8 @@ class App:
         self.tr = i18n.translator(self.lang)
         self.name = i18n.name(self.lang)   # 知らせの窓のタイトル
         self.app_title = f"{self.name} {__version__}"   # 窓のタイトル（更新されたかが分かるように版を付ける。11-11 マスター）
-        self._lw = 10 if self.lang == "ja" else 14   # 行の名前の幅（英語は長い）
-        self._vw = 12 if self.lang == "ja" else 18   # スライダの値の幅（「（推奨）」の英語が長い）
+        self._lw = 12 if self.lang == "zh" else (10 if self.lang == "ja" else 14)   # 行の名前の幅（英語は長い、中文取中）
+        self._vw = 12 if self.lang == "zh" else (12 if self.lang == "ja" else 18)   # スライダの値の幅
         root.withdraw()  # 出すのは Hub が決める
         root.title(self.app_title)
         root.minsize(560, 0)   # 高さの下限は _build で決める（上と下の段が必ず見える高さ）
@@ -1201,7 +1205,7 @@ def main():
         root.destroy()
         return
     host = hosts.find(hwnd)   # 窓より前の知らせ（起動の途中など）は、この MMD の言葉で
-    i18n.set_default(language(host) if host else "ja")
+    i18n.set_default(language(host) if host else "zh")
     mutex = win32event.CreateMutex(None, False, APP_MUTEX)  # 終わるまで持っておく
     if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
         if not _notify_running(hwnd, OPEN_MESSAGE if show else ATTACH_MESSAGE) and show:

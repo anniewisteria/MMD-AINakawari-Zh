@@ -1,0 +1,1256 @@
+"""AIナカワリ の窓。MMD のメニュー「AIナカワリ」→「AIナカワリの窓を開く」から開く（MMDPlugin のプラグイン mmd_plugin/nakawari_plugin.cpp）。
+
+使い方: MMD でモデルを選び、いつもどおりポーズを付けてキーを打つ → ここでプロンプトを入れて「生成」。
+生成は裏で回すので窓は固まらない。「元に戻す」で生成前のモーションに戻せる。
+窓は MMD ごとに 1 つで、その MMD の持ち物（MMD の上に出て、MMD と一緒に隠れる）。× は隠すだけで、MMD のメニューからまた開ける。
+プロセスは 1 つだけ。プラグインは、動いていれば見えない窓（AINakawari.Hub）に「この MMD の窓を開いて」と知らせ、
+動いていなければ --open <MMD の窓> 付きで起動する。全部の MMD が閉じたら、常駐（resident.py）も終わらせて終わる。
+"""
+import argparse
+import ctypes
+import json
+import os
+import queue
+import threading
+import time
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+import win32api
+import win32con
+import win32event
+import win32gui
+import winerror
+
+from . import __version__, applog, gpu, hosts, i18n, panel, paths, pipeline, resident, runner, samples, smooth_stop, thin
+from .i18n import N_, _
+from .installer import window as setup_window
+from .message_window import MessageWindow, register_message
+from . import vmd
+from .mmd_skel import MMDSkeleton
+from .widgets import Fold, PromptRows, ScrollFrame, set_enabled
+
+# 開発版を配布版と並べて動かす時は、環境変数 AINAKAWARI_INSTANCE（例: dev）で「1 つだけ」の印と目印の名前を分ける
+# （11-11 MMM 版を作る時、マスターの MMD で配布版の窓が動いていて、MMM のボタンの知らせがそちらへ行っていた）。
+# 配布版は付けないので、名前は今までと同じ（MMD のプラグイン nakawari_plugin.cpp が探す HUB_CLASS も同じまま）
+_INSTANCE = os.environ.get("AINAKAWARI_INSTANCE", "").strip()
+APP_MUTEX = "Local\\AINakawari.App.v1" + (f".{_INSTANCE}" if _INSTANCE else "")
+HUB_CLASS = "AINakawari.Hub" + (f".{_INSTANCE}" if _INSTANCE else "")   # プラグインと 2 回目の起動が探す目印（nakawari_plugin.cpp と同じ）
+OPEN_MESSAGE = "AINakawari.Open.v1"    # wparam = 開きたい MMD の窓
+ATTACH_MESSAGE = "AINakawari.Attach.v1"   # wparam = MMD の窓。窓を隠したまま作る（MMD の右下のパネル用。nakawari_plugin.cpp）
+ATTACH_WAIT = 30   # 隠したまま作る時に、起動の途中の MMD の窓が見えるようになるまで待つ秒数
+PANEL_MESSAGE = "AINakawari.Panel.v1"     # wparam = MMD の窓・lparam = 押されたパネルのボタン（panel.GENERATE など）
+_set_window_long = ctypes.windll.user32.SetWindowLongPtrW
+_set_window_long.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+_set_window_long.restype = ctypes.c_void_p
+SETTINGS_PATH = os.path.join(runner.WORK_DIR, "settings.json")
+CFG_DEFAULT = 2.0             # プロンプトの効き・キーの効きの推奨（Kimodo の既定）。「推奨に戻す」もこの値
+CFG_RANGE = (0.5, 10.0, 0.5)  # スライダの下限・上限・刻み
+DEFAULTS = {
+    "tab": "kimodo", "mode": "fill", "range_mode": "keys", "length": "",   # 範囲は選んだキーの間から（11-05 マスター）
+    "prompt": "A person moves naturally between poses.",
+    "steps": 100, "seed": -1, "post_processing": True, "cfg_text": CFG_DEFAULT, "cfg_key": CFG_DEFAULT,
+    "stop_at_last_key": True, "smooth_stop": True, "key_stop": False, "wrist_lerp": False,
+    "thin": thin.DEFAULT_LEVEL, "thin_nakawari": thin.DEFAULT_LEVEL,   # キーの間引き（Kimodo・MotionBricks のタブごと）
+    "use_llama": True,   # プロンプトの読み取り（Llama 3）を使う。メインメモリが足りない時は外す（11-10 マスター）
+    "root_move": False, "root_turn": False,   # 歩いた分の移動・向きを全ての親に載せる（11-12 マスター）
+}
+# Tk は空白でしか折り返さないので、行は自分で分ける（「MMD の」の空白で折れて 1 行目が短くなっていた）
+THIN_NOTE = N_("生成したキーを、MMD の補間曲線で表せる所だけ減らします。\n"
+               "右ほど少なくなり、動きは元から少しずつ離れます（左端は間引きません）")
+# 前の窓の保存にあった項目（読む時に変換して捨てる。perf_mode は 11-07 まであった動作モード・use_center は 11-07 までのチェック）
+OLD_KEYS = ("use_keys", "range_start", "range_end", "pmx", "perf_mode", "use_center")
+TABS = [("kimodo", "Kimodo"), ("nakawari", "MotionBricks")]   # 右下のパネルの選び方と同じ名前（11-06 マスター。前は「プロンプトで作る／中割り」）
+MODES = [("fill", N_("キーの間を埋める")), ("extend", N_("続きを足す")), ("fresh", N_("プロンプトだけで作る")),
+         ("center", N_("センターに合わせて作る"))]
+MODE_NOTES = {
+    "fill": N_("打ったキーのポーズを守って、キーとキーの間を作ります（長さは最後のキーまで）"),
+    "extend": N_("範囲の終わり（「全部」なら最後のキー）の後ろに、長さの分だけ続きを足します。それより前の動きは変えません"),
+    "fresh": N_("最初のキーの場所と向きから、プロンプトだけで動きを作ります"),
+    # 11-07 まで「詳しい設定」のチェック（センターの動きを使う）だった。キーの間を埋めるのと同じ範囲で、キーのポーズは使わない
+    "center": N_("腰の位置・高さだけをセンター（キーと補間）に合わせ、ポーズと動きはプロンプトから作ります（長さは最後のキーまで）"),
+}
+NAKAWARI_NOTE = N_("打ったキーとキーの間を、プロンプト無しで MotionBricks がつなぎます。\n"
+                   "作るのはキーの間が 17〜57 フレームの所で、それ以外は MMD の補間を使います。")
+READY = N_("MMD でキーを打ってから「生成」を押してください")
+NO_MODEL = N_("AI のモデルがまだ入っていません。下の「セットアップ」で入れてください")
+
+
+def language(host):
+    """その MMD（MMM）の言葉。中文版固定 "zh"。
+
+    原版靠「MMD 是否 English Mode」在 ja / en 间切换；中文版不需要这个判断，
+    固定中文即可（MMDLink.language() 也已返回 "zh"）。読めない時も中文。
+    """
+    try:
+        return host.link().language()
+    except Exception:
+        applog.exception("MMD の言葉（英語モードか）を読めませんでした:")
+        return "zh"
+
+def front_mmd():
+    """一番手前の MMD か MMM（MikuMikuMoving）の窓。無ければ None（hosts.front）。"""
+    host = hosts.front()
+    return host.hwnd if host else None
+
+
+class Hub:
+    """MMD ごとの窓（App）をまとめる。見えない tk の親の窓と、プラグインからの知らせを受ける窓を持つ。"""
+
+    def __init__(self, root):
+        self.root = root
+        self.apps = {}   # MMD の窓 → App
+        self.waiting = {}   # 隠したまま作るのを待っている MMD の窓 → 待つ期限（見えるようになったら作る）
+        self.alive = True
+        self.requests = queue.Queue()
+        self.listener = MessageWindow(HUB_CLASS, {
+            OPEN_MESSAGE: lambda w, _l: self.requests.put(("open", int(w), 0)),
+            ATTACH_MESSAGE: lambda w, _l: self.requests.put(("attach", int(w), 0)),
+            PANEL_MESSAGE: lambda w, l: self.requests.put(("panel", int(w), int(l))),
+        })
+        self.listener.start()
+        self._poll()
+
+    def open(self, hwnd, show=True):
+        """その MMD の窓を出す（まだ無ければ作る）。show=False なら隠したまま作る（MMD の右下のパネルから使う）。
+
+        隠したまま作るのは MMD の起動の途中（プラグインの start）に頼まれるので、MMD の窓がまだ見えておらず、
+        list_windows に出てこない（11-04、それで Python がすぐ終わっていた）。なので見えるまで ATTACH_WAIT 秒待つ。
+        """
+        mmd = hosts.find(hwnd)   # MMD か MMM（11-11 MMM 版。hosts.py）
+        if mmd is None:
+            if show:
+                messagebox.showerror(i18n.name(), _("開こうとした MMD・MMM が見つかりません。開いているか確かめてください"))
+            elif win32gui.IsWindow(hwnd):
+                self.waiting.setdefault(hwnd, time.monotonic() + ATTACH_WAIT)
+        else:
+            self.waiting.pop(hwnd, None)
+            if hwnd not in self.apps:
+                self.apps[hwnd] = App(tk.Toplevel(self.root), self, mmd)
+            if show:
+                self.apps[hwnd].show()
+        if not self.apps and not self.waiting:
+            self._finish()
+
+    def rebuild(self, app):
+        """その MMD の窓を作り直す（MMD の英語モードが変わった時。App._check_language）。
+        入力（設定として保存してから新しい窓が読む）・ログ・窓とログの窓が出ていたかを引き継ぐ。hub.forget は通さない（窓が 0 になって終わらないように）。"""
+        app._save_inputs()
+        shown, log_shown = bool(app.root.winfo_viewable()), bool(app.log_win.winfo_viewable())
+        log = app.log.get("1.0", "end-1c")
+        app.closed = True
+        app.root.destroy()
+        new = self.apps[app.mmd.hwnd] = App(tk.Toplevel(self.root), self, app.mmd)
+        if log:
+            new.log.configure(state="normal")
+            new.log.insert("end", log + "\n")
+            new.log.see("end")
+            new.log.configure(state="disabled")
+        if shown:
+            new.show()
+        if log_shown:
+            new._toggle_log()
+
+    def forget(self, app):
+        self.apps.pop(app.mmd.hwnd, None)
+        if not self.apps and not self.waiting:   # 起動の途中の MMD を待っている間は終わらない（11-05 Codex のレビュー）
+            self._finish()
+
+    def _finish(self):
+        """相手の MMD が 1 つも無くなったら終わる。セットアップの窓が出ている間は、閉じられるまで待つ（裏の uv などを置き去りにしない）。"""
+        if setup_window.is_open():
+            self.root.after(1000, lambda: self._finish() if not self.apps and not self.waiting and self.alive else None)
+            return
+        self.alive = False
+        self.root.destroy()
+
+    def close(self):
+        self.listener.stop()
+
+    def _poll(self):
+        while not self.requests.empty():
+            kind, hwnd, button = self.requests.get()
+            if kind == "panel":
+                if hwnd not in self.apps:
+                    self.open(hwnd, show=False)
+                if hwnd in self.apps:
+                    self.apps[hwnd].panel_pressed(button)
+            else:
+                self.open(hwnd, show=kind == "open")
+        for hwnd, deadline in list(self.waiting.items()):   # 起動の途中の MMD が見えるようになったら作る
+            if time.monotonic() > deadline or not win32gui.IsWindow(hwnd):
+                self.waiting.pop(hwnd)
+                if not self.apps and not self.waiting:
+                    self._finish()
+            elif self.alive:
+                self.open(hwnd, show=False)
+        if self.alive:
+            self.root.after(100, self._poll)
+
+
+class App:
+    """MMD 1 つ分の窓。root はその MMD 用の Toplevel。mmd は hosts.Host（MMM＝MikuMikuMoving の時もある。やり取りは self.link）。"""
+
+    def __init__(self, root, hub, mmd):
+        self.root = root
+        self.hub = hub
+        self.mmd = mmd
+        self.link = mmd.link()   # MMD なら MMDLink、MMM なら MMMLink（同じ口）
+        # 言葉は窓を作る時の MMD のモードで決める（窓を開き直すまで変えない。11-11 マスター）。窓の部品は self.tr、
+        # 生成などの仕事のスレッドと、ほかの部品を呼ぶ所は i18n.use(self.lang) の中で _() を引く
+        self.lang = language(mmd)
+        # 窓のボタンから呼ぶ部品（widgets.py など）の _() も、この言葉で引くように（MMD が 1 つの時。11-11 0.4.1）
+        i18n.set_default(self.lang)
+        self._lang_ticks = 0
+        self.tr = i18n.translator(self.lang)
+        self.name = i18n.name(self.lang)   # 知らせの窓のタイトル
+        self.app_title = f"{self.name} {__version__}"   # 窓のタイトル（更新されたかが分かるように版を付ける。11-11 マスター）
+        self._lw = 12 if self.lang == "zh" else (10 if self.lang == "ja" else 14)   # 行の名前の幅（英語は長い、中文取中）
+        self._vw = 12 if self.lang == "zh" else (12 if self.lang == "ja" else 18)   # スライダの値の幅
+        root.withdraw()  # 出すのは Hub が決める
+        root.title(self.app_title)
+        root.minsize(560, 0)   # 高さの下限は _build で決める（上と下の段が必ず見える高さ）
+        root.attributes("-topmost", False)
+        self.cfg = dict(DEFAULTS)
+        try:
+            saved = json.load(open(SETTINGS_PATH, encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = {}
+        if "mode" not in saved and saved.get("use_keys") is False:   # 前の窓の「打ったキーのポーズを守る」オフ
+            saved["mode"] = "fresh" if saved.get("length") else "fill"
+        # 「センターの動きを使う」のチェック（11-07 まで）は、プロンプトだけで作る時と組み合わせる物だった。やりたいことの 4 つ目にした
+        if saved.get("use_center") and saved.get("mode") == "fresh":
+            saved["mode"] = "center"
+        self.cfg.update({k: v for k, v in saved.items() if k not in OLD_KEYS})
+        if self.cfg["mode"] == "nakawari":   # 中割りがモードの 1 つだった時の保存（11-04 の昼）
+            self.cfg.update(tab="nakawari", mode="fill")
+        self.q = queue.Queue()
+        self.busy = False
+        # 生成の中断（11-10 マスター）。生成中は「生成」が「中断」になる。押せるのは MMD に書き戻す前まで（cancellable）
+        self.cancel = threading.Event()
+        self.cancellable = False
+        self.selected_keys = None   # MMD のタイムラインで選んでいるキーのフレーム（_read_mmd が 1 秒ごとに読む。読めなければ None）
+        # 「続きを足す」の時だけ読む: 骨（VMD の名前）→ キーのフレーム と、選択中のモデルの書き戻す骨（PMX ごとに覚える）
+        self._key_frames = self._body_names = None
+        self._body_cache = {}
+        self._status_before = None   # 生成できない知らせ（GPU が無い・キーを選んでいない）を出す前の 1 行（出していない時は None）
+        self._model_ticks = 1   # MMD の読み取り（モデル・今のフレーム・範囲選択）は 2 回に 1 回（1 秒ごと）。最初はすぐ読む
+        self.last_run = runner.load_last_run(self.link)   # この MMD での前回の生成（作り直しと「元に戻す」に使う）。窓を開き直しても残る
+        self.last_backup = self.last_run["backup"] if self.last_run else None
+        with i18n.use(self.lang):   # GPU の診断などの文も、この窓の言葉で作る
+            self._build()
+        # MMD の右下のパネル。窓と同じ設定を、変わった方からもう一方へ写す（_sync_panel）
+        self.panel = panel.Panel(mmd.hwnd, nested=mmd.kind == "mmm")   # MMM のパネルはプラグインのタブの中（mmm_plugin/AINakawariPanel.cs）
+        self._seen = {}   # 最後に同期した時の値 {("panel"|"window", 項目): 値}
+        root.protocol("WM_DELETE_WINDOW", root.withdraw)
+        self._tick()
+
+    def show(self):
+        """窓を出す。持ち主（MMD）は出すたびに付け直す（隠したまま作った窓は、出すまで枠の窓が決まらないため）。"""
+        self.root.deiconify()
+        self.root.update_idletasks()
+        frame = int(self.root.wm_frame(), 16)
+        _set_window_long(frame, -8, self.mmd.hwnd)  # GWLP_HWNDPARENT（トップレベルの窓では持ち主）
+        self.root.lift()
+        self.root.focus_force()
+
+    def close(self):
+        """この MMD の窓を片付ける。"""
+        self.closed = True   # 予約済みの _tick が、壊した後の窓を触らないように（11-11 動作報告の app.log に TclError）
+        self.root.destroy()
+        self.hub.forget(self)
+
+    # ---------------- 画面 ----------------
+
+    def _build(self):
+        """上（モデル）と下（範囲・生成・状態）は固定し、真ん中のタブだけを伸び縮みさせる。
+
+        tkinter は入りきらない分を下から黙って切るので、生成を一番下寄りに積んでいた前の並びでは、窓を低くすると生成が消えていた。
+        タブの中身は ScrollFrame に入れ、入りきらなければスクロールする。タブを切り替えても窓の大きさは変えない。
+        """
+        pad = {"padx": 10, "pady": 4}
+        f = ttk.Frame(self.root)
+        f.pack(fill="both", expand=True)
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(1, weight=1)
+
+        # 上: MMD のモデル欄で選んだモデルに効く
+        head = ttk.Frame(f)
+        head.grid(row=0, column=0, sticky="we", **pad)
+        self.model_text = tk.StringVar(value=self.tr("選択中のモデル：（読み取り中）"))
+        ttk.Label(head, textvariable=self.model_text).pack(side="left")
+        self.diagnosis = gpu.diagnose()
+
+        # 真ん中: やり方ごとのタブ
+        self.tabs = ttk.Notebook(f)
+        self.tabs.grid(row=1, column=0, sticky="nsew", padx=10, pady=(2, 4))
+        pages = []
+        for _, text in TABS:
+            page = ScrollFrame(self.tabs)
+            self.tabs.add(page, text=text)
+            pages.append(page.inner)
+        self._build_kimodo(pages[0])
+        self._build_nakawari(pages[1])
+        self.tabs.select(1 if self.cfg["tab"] == "nakawari" else 0)
+
+        # 下: どちらのタブにも効く範囲・生成・状態
+        foot = ttk.Frame(f)
+        foot.grid(row=2, column=0, sticky="we", padx=10, pady=(0, 8))
+        rf = ttk.Frame(foot)
+        rf.pack(fill="x", pady=(0, 4))
+        ttk.Label(rf, text=self.tr("範囲"), width=self._lw).pack(side="left")
+        # 前の保存の "mmd"（MMD の範囲選択の欄を読んでいた形）は、選んだキーの間に置き換える
+        self.range_mode = tk.StringVar(value="keys" if self.cfg["range_mode"] in ("keys", "mmd") else "all")
+        self.range_text = tk.StringVar(value=self.tr("選んだキーの間"))
+        ttk.Radiobutton(rf, text=self.tr("全部"), value="all", variable=self.range_mode, command=self._mode_changed).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(rf, textvariable=self.range_text, value="keys", variable=self.range_mode,
+                        command=self._mode_changed).pack(side="left")
+        bf = ttk.Frame(foot)
+        bf.pack(fill="x")
+        self.gen_btn = ttk.Button(bf, text=self.tr("生成"), command=self._generate_or_cancel)
+        self.gen_btn.pack(side="left", fill="x", expand=True, ipady=8)
+        self.undo_btn = ttk.Button(bf, text=self.tr("元に戻す"), command=self._undo, state="disabled")
+        self.undo_btn.pack(side="left", padx=(6, 0), ipady=8)
+        sf = ttk.Frame(foot)
+        sf.pack(fill="x", pady=(4, 0))
+        ttk.Button(sf, text=self.tr("ログ"), width=6, command=self._toggle_log).pack(side="right")
+        ttk.Button(sf, text=self.tr("セットアップ"), command=self._open_setup).pack(side="right", padx=(0, 4))
+        # 状態は 1 行（下の段の高さを変えない）。長い失敗の文はログと失敗の窓に全文が出る
+        self.status = tk.StringVar(value=self.tr(READY))
+        ttk.Label(sf, textvariable=self.status, foreground="#335").pack(side="left", fill="x", expand=True)
+
+        # ログは別の小さな窓（本体の並びを押し出さない）。× は隠すだけ
+        self.log_win = tk.Toplevel(self.root)
+        self.log_win.title(self.tr("AIナカワリ のログ"))
+        self.log_win.withdraw()
+        self.log_win.protocol("WM_DELETE_WINDOW", self.log_win.withdraw)
+        # 困った時に送ってもらう記録（app.log・*_server.log）のある所を開く（README の「困った時は」）
+        lf = ttk.Frame(self.log_win)
+        lf.pack(side="bottom", fill="x", padx=4, pady=4)
+        ttk.Button(lf, text=self.tr("記録のフォルダを開く"), command=lambda: os.startfile(paths.WORK_DIR)).pack(side="left")
+        ttk.Label(lf, text=self.tr("困った時は、このフォルダの app.log と、名前が _server.log で終わるファイルを GitHub の Issues に添えてください"), foreground="#555").pack(
+            side="left", padx=(8, 0))
+        bar = ttk.Scrollbar(self.log_win, orient="vertical")
+        bar.pack(side="right", fill="y")
+        self.log = tk.Text(self.log_win, width=90, height=24, wrap="word", state="disabled", background="#f6f6f6",
+                           yscrollcommand=bar.set)
+        self.log.pack(fill="both", expand=True)
+        bar.configure(command=self.log.yview)
+        self._mode_changed()
+        self.refresh_setup()
+
+        # 窓の高さの下限: 上と下の段と、タブの見出し＋中身 3 行ほど。これより低くできないので、生成と状態は必ず見える
+        self.root.update_idletasks()
+        self.root.minsize(560, head.winfo_reqheight() + foot.winfo_reqheight() + 150)
+
+    def _toggle_log(self):
+        if self.log_win.winfo_viewable():
+            self.log_win.withdraw()
+        else:
+            self.log_win.deiconify()
+            self.log_win.lift()
+
+    def _build_kimodo(self, t):
+        """「Kimodo」タブ（プロンプトで作る）。"""
+        # やりたいこと・長さ。行ごとに別の並びにする（表の列を共有すると、説明の長さが変わった時にボタンが横にずれる）
+        def line(title, pady=(0, 0)):
+            row = ttk.Frame(t)
+            row.pack(fill="x", pady=pady)
+            ttk.Label(row, text=self.tr(title) if title else "", width=self._lw).pack(side="left")
+            return row
+
+        # Kimodo が入っていない時だけ、タブの一番上に出す（refresh_setup。MotionBricks のタブの nakawari_missing と同じ。11-06 マスター）
+        self.kimodo_missing = ttk.Label(t, text=self.tr("Kimodo がまだ入っていません。下の「セットアップ」で入れてください"), foreground="#a33")
+        mode_row = line(N_("やりたいこと"))
+        self.kimodo_top = mode_row
+        self.mode = tk.StringVar(value=self.cfg["mode"] if self.cfg["mode"] in MODE_NOTES else "fill")
+        for key, text in MODES:
+            ttk.Radiobutton(mode_row, text=self.tr(text), value=key, variable=self.mode, command=self._mode_changed).pack(side="left", padx=(0, 12))
+        self.mode_note = tk.StringVar()
+        # 説明が 1 行でも 2 行でも高さを変えない（変わると下の段が縦にずれる）
+        tk.Label(line(""), textvariable=self.mode_note, foreground="#556", background=ttk.Style().lookup("TFrame", "background"),
+                 wraplength=420, height=2, anchor="nw", justify="left").pack(side="left", fill="x")
+        length_row = line(N_("長さ"), pady=(4, 0))
+        self.length = tk.StringVar(value=str(self.cfg["length"]))
+        self.length_entry = ttk.Entry(length_row, textvariable=self.length, width=6)
+        self.length_entry.pack(side="left")
+        self.length_note = tk.StringVar()
+        ttk.Label(length_row, textvariable=self.length_note, foreground="#556").pack(side="left", padx=(6, 0))
+        self.length.trace_add("write", lambda *_: self._extend_changed())
+        # 「続きを足す」で、足す所に体のキーがある時の赤い注意（11-07 マスター）。無い時も 1 行の高さを取り、下の段をずらさない
+        self.extend_warn = tk.StringVar()
+        tk.Label(line(""), textvariable=self.extend_warn, foreground="#c22", background=ttk.Style().lookup("TFrame", "background"),
+                 wraplength=420, anchor="w", justify="left").pack(side="left", fill="x")
+        # 生成したキーの間引き（長さの下に。11-09 マスター）
+        self.thin_kimodo = tk.DoubleVar(value=self.cfg["thin"])
+        self._thin_slider(line(N_("キーの間引き"), pady=(4, 0)), line(""), self.thin_kimodo)
+        # キーは「その瞬間にこの姿勢を通る」だけなので、止めないと走りなどは最後のキーを勢いのまま通り過ぎる
+        self.stop = tk.BooleanVar(value=self.cfg["stop_at_last_key"])
+        stop_row = line("", pady=(4, 0))
+        self.stop_check = ttk.Checkbutton(stop_row, text=self.tr("最後のキーで止まる"), variable=self.stop,
+                                          command=self._stop_changed)
+        self.stop_check.pack(side="left")
+        # Kimodo だけだとキーの直前で急に止まるので、止まる所を MotionBricks で作り直す（smooth_stop.py）
+        self.smooth = tk.BooleanVar(value=self.cfg["smooth_stop"] and smooth_stop.available())
+        self.smooth_check = ttk.Checkbutton(stop_row, text=self.tr("なめらかに止まる"), variable=self.smooth)
+        self.smooth_check.pack(side="left", padx=(12, 0))
+        # 歩いた分の移動・向きを全ての親に載せる（センターには歩きの揺れだけ残る。11-12 マスター「全親が置いてけぼりになる」）。
+        # 載せるのは始まりの姿勢だけが決まっている時（途中に体のキー・全ての親のキーがあれば今までどおり。理由はログに出る）
+        self.root_move = tk.BooleanVar(value=self.cfg["root_move"])
+        self.root_turn = tk.BooleanVar(value=self.cfg["root_turn"])
+        # 見出しはボーンの名前だけにして、何をするかはチェックの字で言い切る（11-12 マスター「全ての親へ」は雑な訳に見える）
+        root_row = line(N_("全ての親"), pady=(4, 0))
+        ttk.Checkbutton(root_row, text=self.tr("移動を載せる"), variable=self.root_move).pack(side="left")
+        ttk.Checkbutton(root_row, text=self.tr("向きを載せる"), variable=self.root_turn).pack(side="left", padx=(12, 0))
+        ttk.Label(line(""), text=self.tr("歩いた分を全ての親が受け持ち、センターには揺れだけ残ります"),
+                  foreground="#556").pack(side="left")
+        ttk.Separator(t).pack(fill="x", pady=(8, 6))
+
+        # プロンプト（区間ごとの行）
+        ttk.Label(t, text=self.tr("プロンプト（英語。1 行が 1 区間の動き）")).pack(anchor="w")
+        self.prompt_rows = PromptRows(t)
+        self.prompt_rows.pack(fill="x", pady=(4, 0))
+        self.prompt_rows.load(self.cfg["prompt"])
+        self.split_text = tk.StringVar(value=self.tr("＋ 今のフレームで区切る"))
+        prompt_bar = ttk.Frame(t)
+        prompt_bar.pack(anchor="w", pady=(4, 0))
+        ttk.Button(prompt_bar, textvariable=self.split_text, command=self._split_here).pack(side="left")
+        # 英語が苦手な人向けに「動作：英語」の一覧から選ぶ（MMD の右下のパネルと同じ一覧。11-05 マスター）
+        sample_button = ttk.Button(prompt_bar, text=self.tr("サンプルから選ぶ ▼"))
+        sample_button.configure(command=lambda: self._show_samples(sample_button))
+        sample_button.pack(side="left", padx=(8, 0))
+        # 「Llama を使う」（Llama を入れている時だけ出す。メインメモリが足りない人は外す。11-10 マスター）と、
+        # 使えない時の案内（文の欄は打てなくなる）。どちらも refresh_text が出し入れする
+        self.text_free = True
+        self.use_llama = tk.BooleanVar(value=self.cfg["use_llama"])
+        self.llama_row = ttk.Frame(t)
+        ttk.Checkbutton(self.llama_row, text=self.tr("プロンプトの読み取り（Llama 3）を使う"), variable=self.use_llama,
+                        command=self._use_llama_changed).pack(anchor="w")
+        ttk.Label(self.llama_row, text=self.tr("メインメモリが足りない時は外してください（約 8GB 減ります。サンプルの文だけで作ります）"),
+                  foreground="#555").pack(anchor="w", padx=(22, 0))
+        # Tk は空白でしか折り返さず「Llama」と「3）」の間で切れたので、行は自分で分ける（11-10 マスター。THIN_NOTE と同じ）
+        self.prompt_note = ttk.Label(t, foreground="#a33", justify="left")
+        self._prompt_bar = prompt_bar
+
+        # Kimodo の CFG の重み。数字を打つのは面倒なのでスライダ（11-08 マスター）。範囲は前の欄と同じ 0.5〜10・0.5 刻み
+        # よく触るので「詳しい設定」には畳まず、プロンプトのすぐ下に出す（11-08 マスター）
+        # テキストを上げるとプロンプトの動きが強く出る（回転なら 8・1 で振り向くほど）
+        strength = ttk.Frame(t)
+        strength.pack(fill="x", pady=(8, 0))
+        strength.columnconfigure(1, weight=1)
+        self.cfg_text = tk.DoubleVar(value=self.cfg["cfg_text"])
+        self.cfg_key = tk.DoubleVar(value=self.cfg["cfg_key"])
+        self._cfg_slider(strength, 0, self.tr("プロンプトの効き"), self.cfg_text,
+                         self.tr("上げると、文の動きが強く・大きく出ます（動きが弱い・出ない時は 3〜5 に）。上げすぎると大げさで不自然になります"))
+        self._cfg_slider(strength, 2, self.tr("キーの効き"), self.cfg_key,
+                         self.tr("上げると、キーのポーズへ寄せる力が強くなります（キーの前後がカクつく時に）。"
+                                 "下げると、キーの近くも自由に動きます（動きが硬い時に）。キーのフレームの姿勢はどちらでもそのまま残ります"))
+        ttk.Button(strength, text=self.tr("推奨（{v:g}・{v:g}）に戻す", v=CFG_DEFAULT),
+                   command=lambda: (self.cfg_text.set(CFG_DEFAULT), self.cfg_key.set(CFG_DEFAULT))).grid(
+            row=4, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+
+        details = Fold(t, self.tr("詳しい設定"))
+        details.pack(fill="x", pady=(8, 0))
+        d, g = details.body, {"padx": 4, "pady": 2}
+        d.columnconfigure(1, weight=1)
+        top = ttk.Frame(d)
+        top.grid(row=0, column=0, columnspan=3, sticky="w", **g)
+        ttk.Label(top, text=self.tr("計算の回数（少ないほど速い）")).pack(side="left")
+        self.steps = tk.IntVar(value=self.cfg["steps"])
+        ttk.Spinbox(top, from_=10, to=100, increment=10, textvariable=self.steps, width=6).pack(side="left", padx=(4, 16))
+        ttk.Label(top, text=self.tr("seed（-1 で毎回違う動き）")).pack(side="left")
+        self.seed = tk.IntVar(value=self.cfg["seed"])
+        ttk.Entry(top, textvariable=self.seed, width=8).pack(side="left", padx=(4, 0))
+        self.post = tk.BooleanVar(value=self.cfg["post_processing"])
+        ttk.Checkbutton(d, text=self.tr("仕上補正（足すべり・姿勢）"), variable=self.post).grid(row=1, column=0, columnspan=3, sticky="w", **g)
+        # 生成ごとの VMD（元の控え・結果）の置き場（11-11 マスター）。中割りのタブの生成も同じ所に書く
+        ttk.Label(d, text=self.tr("一時ファイルの置き場")).grid(row=2, column=0, sticky="w", **g)
+        self.cache_dir = tk.StringVar()
+        ttk.Entry(d, textvariable=self.cache_dir, state="readonly").grid(row=2, column=1, sticky="ew", **g)
+        cache_bar = ttk.Frame(d)
+        cache_bar.grid(row=2, column=2, sticky="w", **g)
+        ttk.Button(cache_bar, text=self.tr("変更…"), command=self._choose_cache_dir).pack(side="left")
+        ttk.Button(cache_bar, text=self.tr("既定に戻す"), command=lambda: self._set_cache_dir(None)).pack(side="left", padx=(4, 0))
+        ttk.Button(cache_bar, text=self.tr("開く"), command=self._open_cache_dir).pack(side="left", padx=(4, 0))
+        tk.Label(d, text=self.tr("生成のたびに、元の動きの控え（original_）と結果（kimodo_）の VMD をここに書きます"),
+                 foreground="#556", background=ttk.Style().lookup("TFrame", "background"), anchor="w").grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=4)
+        self._show_cache_dir()
+        # GPU 診断（この PC で足りるか）
+        d = self.diagnosis
+        bg = ttk.Style().lookup("TFrame", "background")
+        if d.gpu:   # GPU の情報と判定は行を分ける（1 行にすると判定の途中で折り返していた）
+            tk.Label(t, text=d.summary(), foreground="#556", background=bg, anchor="w").pack(fill="x", pady=(8, 0))
+        # 足りない・GPU が無い時は赤で目立たせる（普段の説明と同じ灰色だと読み飛ばす）
+        tk.Label(t, text=("→ " if d.gpu else "") + d.note, foreground="#556" if d.ok else "#c22", background=bg,
+                 wraplength=500, anchor="w", justify="left").pack(fill="x", pady=(0 if d.gpu else 8, 0))
+
+    def _show_cache_dir(self):
+        try:
+            self.cache_dir.set(paths.load().get(paths.CACHE_KEY) or self.tr("{path}（既定）", path=paths.WORK_DIR))
+        except paths.NotSetUp as e:   # paths.json が壊れている。セットアップで直す
+            self.cache_dir.set(str(e))
+
+    def _choose_cache_dir(self):
+        try:
+            now = paths.cache_dir()
+        except paths.NotSetUp:   # 今の置き場が使えない（外したドライブなど）。選び直しはできるようにする
+            now = paths.WORK_DIR
+        folder = filedialog.askdirectory(parent=self.root, initialdir=now, title=self.tr("一時ファイルの置き場を選ぶ"))
+        if folder:
+            self._set_cache_dir(folder)
+
+    def _set_cache_dir(self, folder):
+        """置き場を書く（None で既定に戻す）。MMD ごとの窓はどれも paths.json を読み直すので、ほかの窓にもすぐ効く。"""
+        try:
+            paths.save_cache_dir(folder)
+        except OSError as e:
+            messagebox.showerror(self.name, self.tr("そのフォルダには書けません: {folder}\n（{error}）", folder=folder, error=e),
+                                 parent=self.root)
+            return
+        for app in list(self.hub.apps.values()):
+            app._show_cache_dir()
+
+    def _open_cache_dir(self):
+        try:
+            os.startfile(paths.cache_dir())
+        except (paths.NotSetUp, OSError) as e:
+            messagebox.showerror(self.name, str(e), parent=self.root)
+
+    def _cfg_slider(self, d, row, title, var, note):
+        """効きのスライダ 1 本（名前・スライダ・今の値）と、その下の説明。値は CFG_RANGE の刻みにそろえる。"""
+        low, high, step = CFG_RANGE
+        shown = tk.StringVar()
+
+        def snap(*_):
+            try:
+                v = float(var.get())
+            except (tk.TclError, ValueError):   # 前の保存が数字でないなど。推奨に戻す
+                v = CFG_DEFAULT
+            s = min(high, max(low, round(v / step) * step))
+            if s != v:
+                # trace の中で同じ変数に書いても、Tcl は trace をもう一度呼ばない。なのでここで return すると、
+                # 刻みに合わない値（ドラッグ中はほぼ全部）で右の数字が変わらなかった（11-08 マスター）
+                var.set(s)
+            shown.set(f"{s:.1f}" + (self.tr("（推奨）") if s == CFG_DEFAULT else ""))
+
+        # 幅は決めない（12 文字にしていて「プロンプトの効き」の「き」が切れていた。11-11 マスター）。列は長い方の名前に合う
+        ttk.Label(d, text=title).grid(row=row, column=0, sticky="w", padx=4, pady=(4, 0))
+        ttk.Scale(d, from_=low, to=high, orient="horizontal", variable=var).grid(row=row, column=1, sticky="ew", padx=4, pady=(4, 0))
+        ttk.Label(d, textvariable=shown, width=self._vw).grid(row=row, column=2, sticky="w", padx=4, pady=(4, 0))
+        tk.Label(d, text=note, foreground="#556", background=ttk.Style().lookup("TFrame", "background"),
+                 wraplength=460, anchor="w", justify="left").grid(row=row + 1, column=0, columnspan=3, sticky="w", padx=4)
+        var.trace_add("write", snap)
+        snap()
+
+    def _thin_slider(self, row, note_row, var):
+        """キーの間引きのスライダ（row に・段の名前つき）と、note_row に説明。段は thin.LEVELS（0 は間引かない）。"""
+        top = len(thin.LEVELS) - 1
+        shown = tk.StringVar()
+
+        def snap(*_):
+            try:
+                v = float(var.get())
+            except (tk.TclError, ValueError):   # 前の保存が数字でないなど。既定に戻す
+                v = thin.DEFAULT_LEVEL
+            s = int(min(top, max(0, round(v))))
+            if s != v:
+                var.set(s)   # 刻みにそろえる（_cfg_slider と同じく、trace の中で書いても trace はもう一度呼ばれない）
+            shown.set(thin.level_name(s, self.lang) + (self.tr("（推奨）") if s == thin.DEFAULT_LEVEL else ""))
+
+        ttk.Scale(row, from_=0, to=top, orient="horizontal", variable=var, length=180).pack(side="left")
+        ttk.Label(row, textvariable=shown, width=self._vw).pack(side="left", padx=(6, 0))
+        tk.Label(note_row, text=self.tr(THIN_NOTE), foreground="#556", background=ttk.Style().lookup("TFrame", "background"),
+                 wraplength=420, anchor="w", justify="left").pack(side="left", fill="x")
+        var.trace_add("write", snap)
+        snap()
+
+    def _build_nakawari(self, t):
+        """「MotionBricks」タブ（プロンプト無しの中割り）。"""
+        tk.Label(t, text=self.tr(NAKAWARI_NOTE), foreground="#556", background=ttk.Style().lookup("TFrame", "background"),
+                 wraplength=500, anchor="w", justify="left").pack(fill="x")
+        self.key_stop = tk.BooleanVar(value=self.cfg["key_stop"])
+        self.wrist_lerp = tk.BooleanVar(value=self.cfg["wrist_lerp"])
+        self.nakawari_checks = [
+            ttk.Checkbutton(t, text=self.tr("キーごとに止まる（外すと、勢いを保って通る）"), variable=self.key_stop),
+            ttk.Checkbutton(t, text=self.tr("手首は MMD の補間にする（回りすぎを抑える）"), variable=self.wrist_lerp),
+        ]
+        self.nakawari_checks[0].pack(anchor="w", pady=(10, 0))
+        self.nakawari_checks[1].pack(anchor="w", pady=(4, 0))
+        # 生成したキーの間引き（「手首は〜」の下に。11-09 マスター）
+        self.thin_nakawari = tk.DoubleVar(value=self.cfg["thin_nakawari"])
+        row, note = ttk.Frame(t), ttk.Frame(t)
+        row.pack(fill="x", pady=(8, 0))
+        note.pack(fill="x")
+        ttk.Label(row, text=self.tr("キーの間引き"), width=self._lw).pack(side="left")
+        ttk.Label(note, text="", width=self._lw).pack(side="left")
+        self._thin_slider(row, note, self.thin_nakawari)
+        self.nakawari_missing = ttk.Label(t, text=self.tr("MotionBricks がまだ入っていません。下の「セットアップ」で入れてください"), foreground="#a33")
+
+    def _open_setup(self):
+        with i18n.use(self.lang):   # セットアップの窓は、開いた時の言葉で作る（installer/window.py）
+            setup_window.open_window(self.hub.root, self.diagnosis, on_done=self.refresh_setup)
+
+    def refresh_setup(self):
+        """入っている物（Kimodo・MotionBricks）に合わせて、窓の部品と状態の 1 行を出し直す。作った時と、セットアップが済んだ時に呼ぶ。"""
+        mb = smooth_stop.available()
+        for check in self.nakawari_checks:
+            set_enabled(check, mb)
+        if mb:
+            self.nakawari_missing.pack_forget()
+        else:
+            self.nakawari_missing.pack(anchor="w", pady=(10, 0))
+        if mb and self.cfg["smooth_stop"]:
+            self.smooth.set(True)
+        self._stop_changed()
+        try:
+            paths.kimodo_dir()
+            self.kimodo_ready = True
+            self.llama_installed = paths.has_text_encoder()
+        except paths.NotSetUp:
+            self.kimodo_ready = False
+            self.llama_installed = False
+        self.refresh_text()
+        if not self.kimodo_ready:   # パネルの状態の 1 行も赤い案内にする（_sync_panel）
+            self.kimodo_missing.pack(anchor="w", pady=(0, 8), before=self.kimodo_top)
+            self.status.set(self.tr(NO_MODEL))
+            return
+        self.kimodo_missing.pack_forget()
+        if self.status.get() == self.tr(NO_MODEL):
+            self.status.set(self.tr(READY))
+
+    def refresh_text(self):
+        """文の欄を打てるかを、Llama が入っているか・「Llama を使う」から決めて、チェックと案内を出し直す。
+        打てない時は、サンプルからだけ選ぶ（パネルの欄は _sync_panel が合わせる。11-10 マスター）。
+        Kimodo をまだ入れていない時は、打てるままにしておく。"""
+        self.text_free = not self.kimodo_ready or (self.llama_installed and bool(self.use_llama.get()))
+        self.prompt_rows.set_readonly(not self.text_free)
+        if self.llama_installed:
+            self.llama_row.pack(anchor="w", pady=(6, 0), after=self._prompt_bar)
+        else:
+            self.llama_row.pack_forget()
+        if self.text_free:
+            self.prompt_note.pack_forget()
+            return
+        if self.llama_installed:
+            how = self.tr("自由に書くには、上の「プロンプトの読み取り（Llama 3）を使う」を入れます")
+            why = self.tr("プロンプトの読み取り（Llama 3）を使わない設定なので、サンプルの文だけ選べます。")
+        else:
+            how = self.tr("自由に書くには、下の「セットアップ」で入れます")
+            why = self.tr("プロンプトの読み取り（Llama 3）を入れていないので、サンプルの文だけ選べます。")
+        self.prompt_note.configure(text=self.tr("{why}\n行を押してから「サンプルから選ぶ」で入れてください。\n{how}", why=why, how=how))
+        self.prompt_note.pack(anchor="w", pady=(4, 0), after=self.llama_row if self.llama_installed else self._prompt_bar)
+
+    def _use_llama_changed(self):
+        """「Llama を使う」を切り替えた: 覚えて、文の欄を出し直す。外したら、常駐の llama-server を今すぐ止める（Kimodo は残す）。"""
+        self.cfg["use_llama"] = bool(self.use_llama.get())
+        try:
+            os.makedirs(runner.WORK_DIR, exist_ok=True)
+            json.dump(self.cfg, open(SETTINGS_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        except OSError:
+            applog.exception("設定を保存できませんでした:")
+        self.refresh_text()
+        if not self.use_llama.get():
+            threading.Thread(target=resident.notify, args=(pipeline.KIMODO_NAME, pipeline.KIMODO_PORT, {"release_text": True}),
+                             name="Llama を止める", daemon=True).start()   # i18n: skip
+
+    def _mode_changed(self):
+        mode = self.mode.get()
+        self.mode_note.set(self.tr(MODE_NOTES[mode]))
+        if mode == "extend":   # 足す長さ。範囲を選んでいても使う（前は範囲の時に欄が効かず、埋めると同じになっていた。11-07 マスター）
+            set_enabled(self.length_entry, True)
+        elif self.range_mode.get() == "keys":
+            set_enabled(self.length_entry, False)
+            self.length_note.set(self.tr("F（範囲の終わりまで）"))
+        elif mode in ("fill", "center"):   # センターに合わせて作るのも、埋めると同じ範囲
+            set_enabled(self.length_entry, False)
+            self.length_note.set(self.tr("F（最後のキーまで）"))
+        else:
+            set_enabled(self.length_entry, True)
+            self.length_note.set(self.tr("F（最初のキーから数えた全部の長さ。必須）"))
+        # 止める位置のキーが無い: プロンプトだけで作る時・続きを足す時（続きの終わりにキーは無い）
+        set_enabled(self.stop_check, mode == "fill")
+        self._stop_changed()
+        self._extend_changed()
+
+    def _stop_changed(self):
+        usable = self.mode.get() == "fill" and self.stop.get() and smooth_stop.available()
+        set_enabled(self.smooth_check, usable)
+
+    def _body_of(self, pmx):
+        """モデルの書き戻す骨（VMD の名前）。PMX ごとに 1 回だけ読む。読めない（Kimodo が無い・PMX でない）時は None。"""
+        if pmx not in self._body_cache:
+            try:
+                skel = MMDSkeleton(pmx)
+                names = {vmd.vmd_name(n) for n in pipeline.body_bone_names(skel, pipeline.Retargeter(skel, paths.soma_json()))}
+            except Exception:   # 注意を出せないだけ。生成の時に同じ理由で止まって知らせる
+                return None
+            self._body_cache[pmx] = names
+        return self._body_cache[pmx]
+
+    def _extend_plan(self):
+        """「続きを足す」の (始まり, 終わり, 上書きされる体のキー)。分からない時（長さが空・MMD を読めない）は None。"""
+        try:
+            add = int(self.length.get().strip())
+        except ValueError:
+            return None
+        if add < 1 or self._key_frames is None or self._body_names is None:
+            return None
+        keys = self.selected_keys
+        if self.range_mode.get() == "keys":
+            if not keys or len(keys) < 2:
+                return None
+            start = keys[-1]
+        else:
+            start = None
+        try:
+            return pipeline.extend_plan(self._key_frames, self._body_names, start, add)
+        except ValueError:
+            return None
+
+    def _extend_changed(self):
+        """「続きを足す」の長さの横の説明（作る所）と、上書きされるキーの赤い注意を出し直す。"""
+        if not hasattr(self, "range_mode"):   # 窓を作っている途中
+            return
+        warn = ""
+        if self.mode.get() == "extend" and self.tabs.index("current") == 0:
+            plan = self._extend_plan()
+            if plan is None:
+                self.length_note.set(self.tr("F 足す（範囲の終わりの後ろに）") if self.range_mode.get() == "keys"
+                                     else self.tr("F 足す（最後のキーの後ろに）"))
+            else:
+                start, end, hit = plan
+                self.length_note.set(self.tr("F 足す（{a}〜{b}F を作ります）", a=start + 1, b=end))
+                if hit:
+                    shown = self.tr("・").join(map(str, hit[:6])) + ("…" if len(hit) > 6 else "")
+                    warn = self.tr("範囲内に上書きされるキーフレームがあります（{frames}F の体のキー）", frames=shown)
+        if self.extend_warn.get() != warn:
+            self.extend_warn.set(warn)
+
+    def _show_samples(self, button):
+        """「サンプルから選ぶ」: 種類ごとの「動作：英語」の一覧を出し、選んだ英語の文を最後に打っていた行に入れる。
+        一覧は押すたびに読む（prompt_samples.txt を書き換えればすぐ反映される）。"""
+        try:
+            groups = samples.load()
+        except OSError as e:
+            messagebox.showerror(self.name, self.tr("サンプルの一覧が読めません: {error}", error=e), parent=self.root)
+            return
+        if getattr(self, "_sample_menu", None) is not None:   # 前に開いた一覧は消す（開くたびに増えていた。11-05 Codex のレビュー）
+            self._sample_menu.destroy()
+        menu = self._sample_menu = tk.Menu(self.root, tearoff=0)
+        if not self.text_free:   # 打てないので、空にする（キーだけで作る）のもここから
+            menu.add_command(label=self.tr("（空にする：プロンプトなしでキーだけで作る）"), command=lambda: self.prompt_rows.set_current(""))
+            menu.add_separator()
+        for name, items in groups:
+            name = samples.group_name(name, self.lang)
+            sub = tk.Menu(menu, tearoff=0) if name else menu
+            for label, prompt in items:   # 英語の時は、動作の名前（日本語）を出さずに英語の文だけ
+                shown = prompt if self.lang == "en" else f"{label}：{prompt}"   # i18n: skip
+                sub.add_command(label=shown, command=lambda p=prompt: self.prompt_rows.set_current(p))
+            if name:
+                menu.add_cascade(label=name, menu=sub)
+        menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+
+    def _split_here(self):
+        """MMD で今いるフレームから新しい区間にする。"""
+        try:
+            frame = self.link.current_frame()
+        except Exception as e:
+            frame, error = None, e
+        else:
+            error = None
+        if frame is None:
+            self.status.set(self.tr("MMD の今のフレームを読めませんでした")
+                            + (self.tr("（{error}）", error=error) if error else ""))
+        elif not self.prompt_rows.add_at(frame):
+            self.status.set(self.tr("{frame}F から始まる区間はもうあります", frame=frame))
+
+    def _read_mmd(self):
+        """MMD の選択中のモデル・今のフレーム・選んだキーを読んで表示する（1 秒ごと）。生成中は MMD を操作しているので読みに行かない。"""
+        self._model_ticks += 1
+        if self.busy or self._model_ticks % 2:
+            return
+        frame = model = None
+        try:
+            model = self.link.selected_model()
+            frame = self.link.current_frame()
+        except Exception as e:  # 読めない理由をそのまま出す（MMD の版が違う・選び替えの途中など）
+            text = self.tr("選択中のモデル：（読み取れません: {error}）", error=e)
+        else:
+            text = (self.tr("選択中のモデル：{name}", name=model['name']) if model else
+                    self._for_host(self.tr("選択中のモデル：（なし。MMD のモデル欄でモデルを選んでください）")))
+        extending = self.mode.get() == "extend" and self.tabs.index("current") == 0
+        try:
+            keys, frames = self.link.key_scan(with_names=extending) if model else ([], None)
+            picked = (self.tr("選んだキーの間（{a}〜{b}F）", a=keys[0], b=keys[-1]) if len(keys) > 1 else
+                      self.tr("選んだキーの間（{a}F だけ。2 つ以上選んでください）", a=keys[0]) if keys else
+                      self.tr("選んだキーの間（キーを選んでいません）"))
+            self.selected_keys = keys
+            self._key_frames = frames
+        except Exception:   # 選び替えの途中などで鎖が読めない時は、次の読み取りで直る
+            picked = self.tr("選んだキーの間（読み取れません）")
+            self.selected_keys = self._key_frames = None
+        self._body_names = self._body_of(model["path"]) if extending and model else None
+        self._extend_changed()
+        updates = [(self.model_text, text),
+                   (self.split_text, self.tr("＋ 今のフレーム（{frame}F）で区切る", frame=frame) if frame is not None
+                    else self.tr("＋ 今のフレームで区切る")),
+                   (self.range_text, picked)]
+        for var, value in updates:
+            if var.get() != value:
+                var.set(value)
+
+    # 生成の本体（runner）や窓の知らせは「MMD に読み込み中」のように MMD を名指しで書いているので、相手が MMM の時は出す前に読み替える
+    # （11-11 MMM 版。「MMD の補間曲線」のような道具の名前としての MMD はそのまま）
+    # 日本語の言い回しの読み替え（MMM の窓は日本語だけ。mmm_link.MMMLink.language）
+    HOST_WORDS = [("MMD に読み込み中", "MMM に書き戻し中"), ("MMD から", "MMM から"), ("MMD で", "MMM で"), ("MMD に", "MMM に"),  # i18n: skip
+                  ("MMD の操作", "MMM の操作"), ("MMD のタイムライン", "MMM のタイムライン"), ("MMD のモデル欄", "MMM のモデルの一覧"),  # i18n: skip
+                  ("MMD のキー", "MMM のキー"), ("MMD が", "MMM が"), ("MMD は", "MMM は")]  # i18n: skip
+
+    def _for_host(self, text):
+        if self.mmd.kind != "mmm" or self.lang != "ja" or "MMD" not in text:
+            return text
+        for a, b in self.HOST_WORDS:
+            text = text.replace(a, b)
+        return text
+
+    def _write_log(self, line):
+        line = self._for_host(line)
+        applog.write(line)
+        self.log.configure(state="normal")
+        self.log.insert("end", line + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _tick(self):
+        if getattr(self, "closed", False) or not self.root.winfo_exists():   # 窓を片付けた後に、予約が残っていた
+            return
+        if not win32gui.IsWindow(self.mmd.hwnd):  # MMD が閉じたら、その MMD の分は一緒に終わる
+            self.close()
+            return
+        # 次の予約は先に入れる（途中で例外が出ると、パネルとの同期も表示の更新も止まっていた。11-05 Codex のレビュー）
+        self.root.after(500, self._tick)
+        if self._check_language():   # 作り直した（この窓はもう無い）
+            return
+        with i18n.use(self.lang):
+            self._tick_body()
+
+    def _check_language(self):
+        """MMD の英語モードが窓の言葉と違ったら、窓を作り直す（2 秒ごと。作り直したら True）。
+        0.4.0 は窓を作る時に 1 回読むだけで、MMD の起動直後はボタンの字がまだ日本語なので、英語モードでも日本語の窓になった。
+        起動したまま English Mode を切り替えた時も、これでついていく（11-11 マスター）。生成中は作り直さない。読めない時は変えない。"""
+        self._lang_ticks += 1
+        if self._lang_ticks % 4 or self.busy:
+            return False
+        try:
+            now = self.link.language()
+        except Exception:
+            return False
+        if now == self.lang:
+            return False
+        applog.write(f"MMD の言葉が {self.lang} から {now} に変わったので、窓を作り直します")
+        self.hub.rebuild(self)
+        return True
+
+    def _save_inputs(self):
+        """窓の入力を self.cfg に写して設定として保存する（作り直す時に、新しい窓へ引き継ぐ）。
+        数字の欄が打ちかけ・区間がおかしいなど、読めない物は前の値のまま（作り直しを止めない）。"""
+        def put(key, read):
+            try:
+                self.cfg[key] = read()
+            except (tk.TclError, ValueError, IndexError):
+                pass
+        put("tab", lambda: TABS[self.tabs.index("current")][0])
+        put("mode", self.mode.get)
+        put("range_mode", self.range_mode.get)
+        put("length", self.length.get)
+        put("prompt", self.prompt_rows.text)
+        put("steps", lambda: int(self.steps.get()))
+        put("seed", lambda: int(self.seed.get()))
+        put("post_processing", lambda: bool(self.post.get()))
+        put("cfg_text", lambda: float(self.cfg_text.get()))
+        put("cfg_key", lambda: float(self.cfg_key.get()))
+        put("stop_at_last_key", lambda: bool(self.stop.get()))
+        put("smooth_stop", lambda: bool(self.smooth.get()))
+        put("key_stop", lambda: bool(self.key_stop.get()))
+        put("wrist_lerp", lambda: bool(self.wrist_lerp.get()))
+        put("thin", lambda: round(self.thin_kimodo.get()))
+        put("thin_nakawari", lambda: round(self.thin_nakawari.get()))
+        put("use_llama", lambda: bool(self.use_llama.get()))
+        put("root_move", lambda: bool(self.root_move.get()))
+        put("root_turn", lambda: bool(self.root_turn.get()))
+        try:
+            os.makedirs(runner.WORK_DIR, exist_ok=True)
+            json.dump(self.cfg, open(SETTINGS_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        except OSError:
+            applog.exception("設定を保存できませんでした:")
+
+    def _tick_body(self):
+        scene = self.mmd.scene_name()
+        title = (f"{self.app_title} - {scene}" if scene else self.app_title) + (self.tr(" （MMM）") if self.mmd.kind == "mmm" else "")
+        if self.root.title() != title:
+            self.root.title(title)
+        self._read_mmd()
+        if self.mmd.kind == "mmm" and "MMD" in self.status.get():   # 窓の中の知らせ（status.set）も MMM の言い回しに
+            self.status.set(self._for_host(self.status.get()))
+        while not self.q.empty():
+            kind, payload = self.q.get()
+            if kind == "log":
+                self._write_log(payload)
+            elif kind == "commit":   # MMD への書き戻しが始まる。ここからは中断できない
+                self.cancellable = False
+            elif kind == "done":
+                self.busy = self.cancellable = False
+                ok, msg = payload
+                msg = self._for_host(msg)
+                self.status.set(msg)
+                if not ok:
+                    messagebox.showerror(self.name, msg, parent=self.root)
+        # 生成できない時は、押してからエラーにせず、押せなくして下の 1 行で知らせる。
+        # GPU が無い時はどちらのタブも（MotionBricks も GPU が要る）
+        # 「選んだキーの間」でキーを 2 つ以上選んでいない時も（11-05 マスター。選んでいない時に全部を作り直さないように）
+        block = None
+        keys = self.selected_keys
+        if not self.diagnosis.usable:
+            block = self.diagnosis.note
+        elif self.range_mode.get() == "keys" and keys is None and not self.busy:   # 読めない時も止める（11-05 Codex のレビュー）
+            block = self.tr("選んだキーを読めません。MMD の操作を終えてから選び直してください")
+        elif self.range_mode.get() == "keys" and keys is not None and len(keys) < 2 and not self.busy:
+            block = self.tr("範囲の最初と最後のキーを選んでください")   # パネルの 1 行に収まる長さ
+        if block and self._status_before is not None and self.status.get() != block:   # 止める理由が変わった
+            self.status.set(block)
+        if block and self._status_before is None:
+            self._status_before = self.status.get()
+            self.status.set(block)
+        elif not block and self._status_before is not None:
+            self.status.set(self._status_before)
+            self._status_before = None
+        # 生成中は「生成」が「中断」になる。押した後（止まるのを待っている間）と、書き戻し・元に戻すの間は押せない
+        can_cancel = self.busy and self.cancellable and not self.cancel.is_set()
+        label = self.tr("中断") if self.busy and self.cancellable else self.tr("生成")
+        if str(self.gen_btn.cget("text")) != label:
+            self.gen_btn.configure(text=label)
+        # 変わった時だけ設定する（毎回設定し直すと、マウスオーバーが 0.5 秒で消えていた。widgets.set_enabled）
+        if set_enabled(self.gen_btn, can_cancel or not (self.busy or block)):
+            # 押しても反応しないことがある（11-08 マスター）。一瞬だけ押せなくなっていたのか、後から記録で分かるように残す
+            applog.write(f"「{label}」を押せるようにしました" if can_cancel or not (self.busy or block)
+                         else f"「{label}」を押せなくしました（{'生成中' if self.busy else block}）")
+        set_enabled(self.undo_btn, bool(self.last_backup and not self.busy))
+        self._sync_panel()
+
+    # ---------------- MMD の右下のパネル ----------------
+
+    def _sync_panel(self):
+        """パネルと窓の設定をそろえる。入力（プロンプト・Kimodo か MotionBricks か）は変わった方からもう一方へ、
+        表示（状態の 1 行・範囲の字・ボタンの押せる押せない）は窓からパネルへ。そろえられたら True（パネルが無い時も）。"""
+        p = self.panel
+        before = p.hwnd
+        if not p.find():
+            return True   # パネルが無い（隠れているのとは別。プラグインが古い等）。そろえる物が無い
+        if p.hwnd != before:   # 新しいパネル（MMD を起動し直した等）。中身を全部写し直す
+            self._seen = {}
+        seen = self._seen
+
+        def window_prompt():
+            try:
+                return self.prompt_rows.text()
+            except ValueError:   # 区間のフレームが数字でない・重なる（打っている途中か、パネルで重ねて書いた）
+                return None
+
+        try:
+            # プロンプト: パネルで変えた → 窓へ（窓の区間がおかしい時も、パネルで直せば写るように）。窓で変えた → パネルへ。
+            # パネルへ書いた時は、読み返した値でなく書いた値を覚える（書いた直後に打った分を、次に「パネルで変えた」と分かるように。
+            # 読み返した値を覚えると、その分は窓に写らないままだった。11-05 Codex のレビュー）
+            # 書いた値は、パネルから読んだ時と同じ形にそろえて覚える（空の区間「45: 」はパネルを通ると「45:」になるので、
+            # 窓の形のまま覚えると、次に「パネルで変えた」と思って窓の直しを巻き戻していた。11-05 Codex のレビュー 2 回目）
+            got = panel.lines_of(p.text(panel.PROMPT))
+            mine = window_prompt()
+            if ("panel", "prompt") not in seen:   # 最初（パネルを作り直した時も）は窓の設定をパネルへ
+                if mine is not None:
+                    p.set_text(panel.PROMPT, panel.one_line(mine))
+                    got = panel.lines_of(panel.one_line(mine))
+            elif got != seen[("panel", "prompt")]:
+                if got != mine:
+                    self.prompt_rows.load(got)
+                    mine = window_prompt()
+            elif mine is not None and mine != seen.get(("window", "prompt")):
+                p.set_text(panel.PROMPT, panel.one_line(mine))
+                got = panel.lines_of(panel.one_line(mine))
+            seen[("panel", "prompt")], seen[("window", "prompt")] = got, mine
+            # Llama なしなら、パネルの文の欄も打てなくする（サンプルの一覧からは入る。11-10 マスター）
+            if seen.get(("window", "readonly")) != (not self.text_free):
+                p.set_readonly(panel.PROMPT, not self.text_free)
+                seen[("window", "readonly")] = not self.text_free
+            # Kimodo か MotionBricks か（窓のタブ）
+            got, mine = p.selection(panel.ENGINE), self.tabs.index("current")
+            if ("panel", "engine") not in seen or (got == seen[("panel", "engine")] and mine != seen[("window", "engine")]):
+                p.select(panel.ENGINE, mine)
+                got = mine
+            elif got != seen[("panel", "engine")] and got != mine:
+                self.tabs.select(1 if got == 1 else 0)
+                mine = self.tabs.index("current")
+            seen[("panel", "engine")], seen[("window", "engine")] = got, mine
+            # 範囲はパネルでは切り替えない（11-05 マスター。チェックを外した）。窓の設定と、選んでいるキーを字で出す
+            keys = self.selected_keys
+            if self.range_mode.get() != "keys":
+                range_text = self.tr("全部のキー")
+            elif keys is None:
+                range_text = self.tr("選んだキー（読めません）")
+            else:
+                range_text = (self.tr("選んだキー {a}〜{b}F", a=keys[0], b=keys[-1]) if len(keys) > 1 else
+                              self.tr("選んだキー {a}F だけ", a=keys[0]) if keys else self.tr("キーを選んでいません"))
+            # AI のモデル（Kimodo）が入っていない時は、状態の 1 行を赤い案内にする（11-06 マスター）
+            missing = not self.kimodo_ready
+            shown = {
+                panel.RANGE: range_text,
+                panel.STATUS: self.tr("詳細の窓で「セットアップ」を押してください") if missing else self.status.get(),
+                panel.GENERATE: str(self.gen_btn.cget("text")),   # 生成中は「中断」
+            }
+            if ("text", "labels") not in self._seen:   # ボタンの字（プラグインは日本語で作る）をこの窓の言葉に（新しいパネルの時も）
+                for item, text in panel.LABELS.items():
+                    p.set_text(item, self.tr(text))
+                self._seen[("text", "labels")] = True
+            for item, text in shown.items():
+                if self._seen.get(("text", item)) != text:
+                    p.set_text(item, text)
+                    self._seen[("text", item)] = text
+            if self._seen.get("alert") != missing:
+                p.alert(missing)
+                self._seen["alert"] = missing
+            states = {panel.GENERATE: str(self.gen_btn.cget("state")) == "normal",
+                      panel.UNDO: str(self.undo_btn.cget("state")) == "normal",
+                      # 中割りはプロンプトを使わないので、欄を灰色にする（字は消さない。11-05 マスター）
+                      panel.PROMPT: self.tabs.index("current") == 0,
+                      panel.SAMPLES: self.tabs.index("current") == 0}
+            for item, on in states.items():
+                if self._seen.get(("enabled", item)) != on:
+                    p.enable(item, on)
+                    self._seen[("enabled", item)] = on
+        except (panel.Busy, win32gui.error):   # MMD が忙しい・パネルがちょうど消えた。次にまた
+            return False
+        return True
+
+    def panel_pressed(self, button):
+        """パネルの「生成」「元に戻す」。押す前に、パネルで打った途中のプロンプトなどを窓に写す。"""
+        if not self._sync_panel():   # 写せないまま進むと、窓に残った古いプロンプトで作っていた（11-05 Codex のレビュー）
+            self.status.set(self.tr("MMD が応答しませんでした。もう一度押してください"))
+            return
+        if button == panel.GENERATE and str(self.gen_btn.cget("state")) == "normal":
+            self._generate_or_cancel(fill=True)
+        elif button == panel.UNDO and str(self.undo_btn.cget("state")) == "normal":
+            self._undo()
+
+    # ---------------- 操作 ----------------
+
+    def _settings(self, fill=False):
+        """窓の設定から runner.Settings を作り、設定を保存する。
+
+        fill: MMD の右下のパネルから。やりたいことは窓の選び方にかかわらず「キーの間を埋める」（11-05 マスター。
+        パネルにはやりたいことが出ないので、窓で「プロンプトだけで作る」にしたのを忘れて、キーを通らないのに戸惑わないように）。
+        窓の選び方（やりたいこと・長さ）は保存し直さない。seed・効き・止まり方などは窓の値を使う。
+        """
+        def opt_int(s):
+            s = s.strip()
+            return int(s) if s else None
+        tab = TABS[self.tabs.index("current")][0]
+        mode = "fill" if fill else self.mode.get()
+        nakawari = tab == "nakawari"
+        in_range = self.range_mode.get() == "keys"   # 範囲を使う時は範囲の終わりまで作るので、長さは使わない（続きを足す時を除く）
+        length = opt_int(self.length.get()) if mode == "fresh" and not nakawari and not in_range else None
+        # 続きを足す: 長さは「範囲の終わり（全部なら最後のキー）の後ろに足すフレーム数」（11-07 マスター）
+        extend = opt_int(self.length.get()) if mode == "extend" and not nakawari else None
+        if nakawari and not smooth_stop.available():
+            raise ValueError(self.tr("MotionBricks がまだ入っていません。詳細の窓の下の「セットアップ」で入れてください"))
+        if not nakawari and mode == "extend" and (extend is None or extend < 1):
+            raise ValueError(self.tr("「続きを足す」では、足す長さ（フレーム数）を入れてください"))
+        if not nakawari and mode == "fresh" and length is None and not in_range:
+            raise ValueError(self.tr("「プロンプトだけで作る」では長さを入れてください"))
+        selection = None
+        if in_range:
+            # 選んだキーの最初から最後までを作り直す（どのボーンのキーでも。範囲の中のキーは選んでいなくても通る）
+            keys = self.link.selected_key_frames()
+            if len(keys) < 2:
+                raise ValueError(self.tr("MMD のタイムラインで、作り直す範囲の最初と最後のキーを選んでください（2 つ以上のフレーム）"))
+            selection = (keys[0], keys[-1])
+        common = dict(range_start=selection[0] if selection else None, range_end=selection[1] if selection else None,
+                      key_stop=bool(self.key_stop.get()), wrist_lerp=bool(self.wrist_lerp.get()),
+                      thin=round(self.thin_nakawari.get() if nakawari else self.thin_kimodo.get()))
+        self.cfg.update(tab=tab, range_mode=self.range_mode.get(), key_stop=common["key_stop"], wrist_lerp=common["wrist_lerp"],
+                        thin=round(self.thin_kimodo.get()), thin_nakawari=round(self.thin_nakawari.get()))
+        if nakawari:
+            # 中割りは、隠れている「Kimodo」タブの欄を読まない（入力の途中や誤りで中割りが止まっていた。11-04 Codex のレビュー）
+            s = runner.Settings(prompt="", engine="motionbricks", **common)
+        else:
+            s = runner.Settings(prompt=self.prompt_rows.text(),
+                                steps=int(self.steps.get()), seed=int(self.seed.get()), post_processing=bool(self.post.get()),
+                                cfg_text=float(self.cfg_text.get()), cfg_key=float(self.cfg_key.get()),
+                                # センターに合わせて作る: 埋めると同じ範囲で、キーのポーズは使わず、毎フレームの腰をセンターに合わせる
+                                length=length, extend=extend, use_keys=mode not in ("fresh", "center"),
+                                use_center=mode == "center",
+                                stop_at_last_key=mode == "fill" and bool(self.stop.get()),
+                                smooth_stop=bool(self.smooth.get()) and smooth_stop.available(), engine="kimodo",
+                                use_llama=bool(self.use_llama.get()),
+                                root_move=bool(self.root_move.get()), root_turn=bool(self.root_turn.get()), **common)
+            self.cfg.update(mode=self.mode.get(), length=self.length.get(), prompt=s.prompt, steps=s.steps, seed=s.seed,
+                            post_processing=s.post_processing, cfg_text=s.cfg_text, cfg_key=s.cfg_key,
+                            stop_at_last_key=bool(self.stop.get()),
+                            smooth_stop=bool(self.smooth.get()), root_move=s.root_move, root_turn=s.root_turn)
+        os.makedirs(runner.WORK_DIR, exist_ok=True)
+        json.dump(self.cfg, open(SETTINGS_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        return s
+
+    def _run(self, fn, ok_message):
+        if self.busy:
+            return
+        self.busy = True
+
+        def work():
+            with i18n.use(self.lang):   # 生成のログ・失敗の文をこの窓の言葉で
+                self._work(fn, ok_message)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _work(self, fn, ok_message):
+        """生成・元に戻すの仕事（work のスレッドで、この窓の言葉の中）。結果と失敗は self.q で窓へ。"""
+        try:
+            r = fn(lambda line: self.q.put(("log", line)))
+            if isinstance(r, dict) and r.get("backup"):
+                self.last_backup = r["backup"]
+                self.last_run = r
+            self.q.put(("done", (True, ok_message)))
+        except resident.Cancelled:   # 中断は失敗ではない。MMD のキーは触っていない（書き戻しの前でしか止まらない）
+            self.q.put(("log", _("中断しました（MMD のキーはそのままです）")))
+            self.q.put(("done", (True, _("中断しました"))))
+        except Exception as e:  # 窓に出して止める（握りつぶさない）。どこで落ちたかは記録にだけ書く
+            applog.exception("失敗した時の traceback:")
+            try:   # 読み込みで止まった時も「元に戻す」で戻せるように、読み込みの前に残した記録を読み直す（11-07 Codex のレビュー）
+                r = runner.load_last_run(self.link)
+                if r:
+                    self.last_run, self.last_backup = r, r["backup"]
+            except Exception:   # MMD が閉じられたなど。失敗の知らせはそのまま出す
+                applog.exception("失敗の後の前回の記録の読み直し:")
+            self.q.put(("log", _("失敗: {error}", error=e)))
+            self.q.put(("done", (False, _("失敗: {error}", error=e))))
+
+    def _generate_or_cancel(self, fill=False):
+        """「生成」のボタン（窓・パネル）。生成中は「中断」として働く。"""
+        if not self.busy:
+            self._generate(fill=fill)
+        elif self.cancellable and not self.cancel.is_set():
+            self.cancel.set()   # 生成のスレッドと常駐が、次の切れ目で止まる（resident.cancellable）
+            self.status.set(self.tr("中断しています…"))
+            self._write_log(self.tr("中断を頼みました…"))
+
+    def _generate(self, fill=False):
+        try:
+            s = self._settings(fill=fill)
+        except (ValueError, RuntimeError) as e:
+            messagebox.showerror(self.name, str(e), parent=self.root)
+            return
+        except tk.TclError:   # 数字の欄（計算の回数・seed・効き）に数字でないものが入っている
+            messagebox.showerror(self.name, self.tr("「詳しい設定」の計算の回数・seed には数字を入れてください"), parent=self.root)
+            return
+        self._write_log("―" * 20)
+        self.status.set(self.tr("生成中…"))
+        previous = self.last_run
+        self.cancel.clear()
+        self.cancellable = True
+        self._run(lambda log: runner.generate(s, log, link=self.link, previous=previous, cancel=self.cancel,
+                                              on_commit=lambda: self.q.put(("commit", None))),
+                  self.tr("できました。MMD で再生して確かめてください"))
+
+    def _undo(self):
+        backup = self.last_backup
+        model = (self.last_run or {}).get("model")   # バックアップを取ったモデル（違うモデルが選ばれていたら止める）
+        self.status.set(self.tr("元に戻し中…"))
+        self._run(lambda log: runner.undo(backup, log, link=self.link, model=model), self.tr("生成前のモーションに戻しました"))
+
+
+def _notify_running(hwnd, message=OPEN_MESSAGE):
+    """もう動いている AIナカワリ に「この MMD の窓を開いて」（隠したまま作って）と知らせる。起動直後で目印がまだ無ければ少し待つ。"""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        hub = win32gui.FindWindowEx(win32con.HWND_MESSAGE, 0, HUB_CLASS, None)
+        if hub:
+            win32gui.PostMessage(hub, register_message(message), hwnd, 0)
+            return True
+        time.sleep(0.1)
+    return False
+
+
+ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MMD-AINakawari.ico")   # tools/make_icon.py が描く
+APP_ID = "BeamManP.MMD-AINakawari"   # タスクバーで、pythonw.exe ではなく AIナカワリ としてまとめる名乗り
+
+
+def _new_root():
+    """tk の親の窓を作り、全部の窓（MMD ごとの窓・セットアップ・ログ・知らせの窓）の既定のアイコンを AIナカワリ にする。
+    前は tkinter の既定の羽根だった（11-06 マスター）。"""
+    root = tk.Tk()
+    root.iconbitmap(default=ICON)
+    return root
+
+
+def main():
+    ap = argparse.ArgumentParser(description="AIナカワリ の窓（ふつうは MMD のメニューから開く）")
+    ap.add_argument("--open", type=int, help="窓を開く MMD の窓（省くと一番手前の MMD）")
+    ap.add_argument("--attach", type=int, help="窓を隠したまま作る MMD の窓（MMD の起動時にプラグインが、右下のパネル用に渡す）")
+    args = ap.parse_args()
+    # 窓を作る前に名乗る（タスクバーのアイコンが Python の物でなく、窓のアイコンになる）
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    show = args.attach is None
+    hwnd = args.open or args.attach or front_mmd()
+    if not hwnd:
+        root = _new_root()
+        root.withdraw()
+        messagebox.showerror(i18n.name(), _("MMD（か MMM）が起動していません。起動してから開いてください"))
+        root.destroy()
+        return
+    host = hosts.find(hwnd)   # 窓より前の知らせ（起動の途中など）は、この MMD の言葉で
+    i18n.set_default(language(host) if host else "zh")
+    mutex = win32event.CreateMutex(None, False, APP_MUTEX)  # 終わるまで持っておく
+    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+        if not _notify_running(hwnd, OPEN_MESSAGE if show else ATTACH_MESSAGE) and show:
+            root = _new_root()
+            root.withdraw()
+            messagebox.showerror(i18n.name(), _("AIナカワリ の起動がまだ終わっていません。少し待ってから、もう一度開いてください"))
+            root.destroy()
+        return
+    applog.setup()   # mutex を取ってから（記録を書くのは 1 つのプロセスだけ）
+    threading.Thread(target=_sweep_cache, name="一時ファイルの掃除", daemon=True).start()   # i18n: skip
+    root = _new_root()
+    applog.hook_tk(root)
+    root.withdraw()  # 親の窓は見せない。MMD ごとの窓（Toplevel）だけ出す
+    hub = Hub(root)
+    try:
+        hub.open(hwnd, show=show)
+        if hub.alive:
+            root.mainloop()
+    finally:
+        hub.close()
+        _stop_residents()
+        del mutex
+
+
+def _sweep_cache():
+    """起動時に、古い一時ファイル（生成ごとの VMD）を裏で消す（runner.sweep_cache。窓が出るのを待たせない。11-11 マスター）。"""
+    try:
+        gone = runner.sweep_cache()
+        if gone:
+            applog.write(f"古い一時ファイルを {gone} 個消しました")
+    except Exception:   # 掃除に失敗しても生成には関わらない。記録にだけ残す
+        applog.exception("一時ファイルの掃除:")
+
+
+def _stop_residents():
+    """MMD が全部閉じて窓のプロセスが終わる時に、常駐（Kimodo と文の読み取りの llama-server・MotionBricks）を終わらせる。
+    前はアイドルの 30 分まで残り、ほかの作業の間も約 8GB をつかんでいた（11-08 マスター）。2 つ並べて止め、待つのは長くて約 10 秒。
+    窓のプロセスは 1 つだけ（APP_MUTEX）なので、入れ物が 2 つあっても、ほかの窓が使っている常駐を止めることはない。"""
+    jobs = [threading.Thread(target=lambda n=n, p=p: applog.write(f"常駐の {n} を終わらせました") if resident.stop(n, p) else None)
+            for n, p in ((pipeline.KIMODO_NAME, pipeline.KIMODO_PORT), ("MotionBricks", smooth_stop.MB_PORT))]
+    for job in jobs:
+        job.start()
+    for job in jobs:
+        job.join()
+
+
+if __name__ == "__main__":
+    main()

@@ -22,11 +22,11 @@ import os
 import pkgutil
 import threading
 
-LANGS = ("ja", "en")
-NAME = {"ja": "AIナカワリ", "en": "AI Nakawari"}   # 名前（英語の時は AI Nakawari。11-11 マスター）
+LANGS = ("ja", "en", "zh")
+NAME = {"ja": "AIナカワリ", "en": "AI Nakawari", "zh": "AI中割"}   # 名前（英語 AI Nakawari・中文 AI中割）
 
 _LANG = contextvars.ContextVar("ainakawari_lang", default=None)
-_default = "ja"
+_default = "zh"   # 中文版：未决定语言的地方（窗口之前的提示等）也默认中文
 _tables = {}
 _lock = threading.Lock()
 

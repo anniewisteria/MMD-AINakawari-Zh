@@ -24,8 +24,9 @@
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace {
-constexpr wchar_t kTitle[] = L"AIナカワリ";
-constexpr wchar_t kOpenLabel[] = L"AIナカワリの窓を開く";
+// 中文版（MMDZh 之类的运行时汉化插件共存时也能用）。ja/en 的字保留，方便和上游对照。
+constexpr wchar_t kTitle[] = L"AI中割";
+constexpr wchar_t kOpenLabel[] = L"打开 AI中割 窗口";
 // MMD の英語モード（ヘルプ → English Mode）の時の字（11-11 マスター）。英語モードかは mmd_english_mode（nakawari_panel.cpp）
 constexpr wchar_t kTitleEn[] = L"AI Nakawari";
 constexpr wchar_t kOpenLabelEn[] = L"Open AI Nakawari window";
@@ -84,15 +85,19 @@ void log_line(const char* format, ...) {
 }
 
 // MMD 自身の「ヘルプ」の位置。英語モードでは「help(&H)」（小文字。11-11 に読んだ。前は「Help」と大文字で比べていて、
-// 英語モードで起動するとメニューを出せなかった）
+// 英語モードで起動するとメニューを出せなかった）。
+// 中文版: MMDZh 之类的运行时汉化插件会把菜单改成「帮助(&H)」，这里也认；全部认不出时回退到菜单栏最后一项，
+// 绝不再因为找不到文字而弹错、直接放弃 start()（原版就是因此整个菜单/面板/消息钩子都没建立）。
 int help_position(HMENU bar) {
     const int n = GetMenuItemCount(bar);
+    if (n <= 0) return -1;
     for (int i = 0; i < n; ++i) {
         wchar_t text[64]{};
         GetMenuStringW(bar, i, text, 64, MF_BYPOSITION);
-        if (std::wcsncmp(text, L"ヘルプ", 3) == 0 || _wcsnicmp(text, L"help", 4) == 0) return i;
+        if (std::wcsncmp(text, L"ヘルプ", 3) == 0 || _wcsnicmp(text, L"help", 4) == 0
+            || std::wcsncmp(text, L"帮助", 2) == 0) return i;
     }
-    return -1;
+    return n - 1;   // 兜底：挂到菜单栏最右，保证菜单一定能出来
 }
 
 // MMD はショートカットのキーを GetKeyState で「今押されているか」見ている（11-05、プロンプト欄で i を打つと MMD の
@@ -189,13 +194,13 @@ public:
         const HMENU bar = GetMenu(hwnd_);
         const int help = bar ? help_position(bar) : -1;
         if (help < 0) {
-            show_error(hwnd_, L"メニューバーに「ヘルプ」が見つからないので、AIナカワリ のメニューを出せませんでした。",
+            show_error(hwnd_, L"菜单栏里找不到「帮助」，无法添加 AI中割 菜单。",
                        L"Could not find Help in the menu bar, so the AI Nakawari menu could not be added.");
             return;
         }
         open_id_ = createWM_APP_ID();  // プラグイン同士でぶつからない番号を MMDPlugin からもらう
         if (open_id_ < 0) {
-            show_error(hwnd_, L"MMDPlugin からメニューの番号をもらえませんでした。", L"Could not get a menu ID from MMDPlugin.");
+            show_error(hwnd_, L"无法从 MMDPlugin 获取菜单编号。", L"Could not get a menu ID from MMDPlugin.");
             return;
         }
         const bool en = mmd_english_mode(hwnd_);
@@ -215,7 +220,7 @@ public:
                                    GetWindowThreadProcessId(hwnd_, nullptr));
         if (!g_hook) {
             const std::wstring code = std::to_wstring(GetLastError());
-            show_error(hwnd_, L"メニューの受け口を作れませんでした（エラー " + code + L"）。", L"Could not hook the menu (error " + code + L").");
+            show_error(hwnd_, L"无法建立菜单消息钩子（错误 " + code + L"）。", L"Could not hook the menu (error " + code + L").");
         }
         log_line("menu added id=0x%x at %d hook=%p", open_id_, help + 1, static_cast<void*>(g_hook));
         english_ = en ? 1 : 0;
@@ -323,7 +328,7 @@ private:
         attach();
         if (const HWND panel = FindWindowExW(hwnd_, nullptr, kPanelClass, nullptr)) {
             SetDlgItemTextW(panel, kStatusLabel, mmd_english_mode(hwnd_) ? L"Starting AI Nakawari. Press it again in a moment"
-                                                                          : L"AIナカワリ を起動しています。少ししてからもう一度押してください");
+                                                                          : L"AI中割 正在启动，请稍后再按一次");
         }
     }
 
@@ -333,7 +338,7 @@ private:
         const std::wstring python = ini_path(L"python"), home = ini_path(L"home");
         if (python.empty() || home.empty()) {
             log_line("launch: python/home missing");
-            if (show_errors) show_error(hwnd_, L"MMD-AINakawari.ini に python と home を書いてください:\n" + ini,
+            if (show_errors) show_error(hwnd_, L"请在 MMD-AINakawari.ini 里填写 python 和 home：\n" + ini,
                                         L"Write python and home in MMD-AINakawari.ini:\n" + ini);
             return;
         }
@@ -346,7 +351,7 @@ private:
         if (!CreateProcessW(python.c_str(), &command[0], nullptr, nullptr, FALSE, 0, nullptr, home.c_str(), &startup, &process)) {
             log_line("launch failed %lu", GetLastError());
             const std::wstring code = std::to_wstring(GetLastError());
-            if (show_errors) show_error(hwnd_, L"AIナカワリ を起動できませんでした（エラー " + code + L"）:\n" + python + L"\n作業フォルダ: " + home,
+            if (show_errors) show_error(hwnd_, L"无法启动 AI中割（错误 " + code + L"）：\n" + python + L"\n工作目录：" + home,
                                         L"Could not start AI Nakawari (error " + code + L"):\n" + python + L"\nWorking folder: " + home);
             return;
         }

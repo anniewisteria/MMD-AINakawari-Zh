@@ -17,7 +17,9 @@ CLASS = "AINakawari.Panel"
 # 部品の番号（nakawari_panel.cpp と同じ）
 ENGINE, RANGE, PROMPT, GENERATE, UNDO, DETAILS, STATUS, SAMPLES = 101, 102, 103, 104, 105, 106, 107, 108
 # プラグインが日本語で作るボタンの字。窓が自分の言葉に書き換える（app._sync_panel。「生成」は生成中に「中断」になるので別に写す）
-LABELS = {SAMPLES: N_("サンプルから選ぶ ▼"), UNDO: N_("元に戻す"), DETAILS: N_("詳　細")}
+# 中文版：把值直接写成中文（zh 翻译表里也保留对应条目，双保险）。
+# 面板按钮的字由 Python 每 0.5 秒覆盖一次（app._sync_panel），所以这里改了就生效。
+LABELS = {SAMPLES: N_("示例 ▼"), UNDO: N_("撤销"), DETAILS: N_("详　细")}
 
 WM_GETTEXT, WM_SETTEXT, WM_GETTEXTLENGTH = 0x000D, 0x000C, 0x000E
 CB_GETCURSEL, CB_SETCURSEL = 0x0147, 0x014E

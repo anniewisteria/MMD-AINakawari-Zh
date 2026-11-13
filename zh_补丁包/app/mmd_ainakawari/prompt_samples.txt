@@ -1,0 +1,62 @@
+# MMD 右下角「AI中割 简易操作」面板与详细窗口里「示例 ▼」用的提示词（给不擅长英文的人）。
+# 写法：[分类|English] 一行分组（竖线后是英语模式显示的分类名），其下每行「动作名：英文提示词」，# 开头的行跳过。
+# 中文版：动作名与分类名已翻成中文；冒号后的英文句子必须保持英文（Kimodo / MotionBricks 只认英文 prompt）。
+# 面板每次按下「示例」都会重新读这个文件，改完立即生效。
+
+[基础|Basics]
+自然衔接关键帧（默认）：A person moves naturally between poses.
+
+[行走·奔跑|Walk / Run]
+向前走：A person walks forward.
+慢慢走：A person is casually walking forward slowly.
+向后走：A person walks backward.
+向右侧移：A person side steps to the right.
+向前跑：A person runs forward.
+慢跑：A person jogs forward at a steady pace.
+蹦跳前进：A person skips forward happily.
+蹑手蹑脚：A person sneaks forward on tiptoes.
+上楼梯：A person begins walking up the stairs.
+边走边转身：A person walks forward and then turns around.
+
+[停止·站立|Stop / Stand]
+跑着停下：A person runs forward and comes to a stop.
+站定张望：A person stands still and looks around.
+换重心：A person stands and shifts their weight from one leg to the other.
+不耐烦地等待：A person waits impatiently, tapping their foot.
+
+[手势动作|Gestures]
+挥右手：A person waves with their right hand.
+双手过头挥动：A person waves both hands above their head.
+向前指：A person points forward with their right hand.
+鞠躬：A person bows politely.
+拍手：A person claps their hands.
+抱臂：A person crosses their arms.
+思考：A person puts a hand on their chin and thinks.
+伸懒腰：A person stretches both arms up high.
+从地上捡东西：A person picks something up from the ground.
+把箱子放到地上：A person sets a box down onto the ground.
+
+[舞蹈|Dance]
+有活力地跳舞：A person is dancing energetically.
+跳嘻哈：A person is doing a hip hop dance while moving around.
+前后踏步：A person is performing dance steps while stepping back and forward.
+转一圈：A person spins around once.
+可爱地摆姿势：A person poses cutely, tilting the head.
+跟着音乐左右摇摆：A person sways side to side to the music.
+
+[运动·动作|Sports / Action]
+原地跳：A person jumps up.
+跳起挥手：A person jumps and waves.
+越过障碍：A person runs forward and then leaps over an obstacle in front of them.
+右直拳：A person throws a right punch.
+右腿前踢：A person kicks forward with their right leg.
+上手投球：A person throws a ball overhand.
+下蹲起立：A person squats down and stands back up.
+走着摔倒：A person walks and falls to the ground.
+
+[情绪|Emotions]
+欢呼雀跃：A person jumps for joy with both arms raised.
+垂头丧气：A person hangs their head and slumps their shoulders.
+生气跺脚：A person stomps their foot angrily.
+吓一跳后退：A person is startled and steps back.
+害羞低头：A person looks down shyly and fidgets.

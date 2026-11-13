@@ -11,11 +11,14 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace {
 constexpr wchar_t kClass[] = L"AINakawari.Panel";   // Python（mmd_ainakawari/panel.py）はこの名前でパネルを探す
-constexpr wchar_t kCaption[] = L"AIナカワリ簡易操作";
+constexpr wchar_t kCaption[] = L"AI中割 简易操作";
 constexpr wchar_t kCaptionEn[] = L"AI Nakawari quick panel";   // 英語モードの時（11-11）
 constexpr int kCameraButton = 536;   // 3D 画面の下の帯の「カメラ編／モデル編」。字体を借りる・今のモードを見る
 constexpr wchar_t kModelModeText[] = L"モデル編";   // カメラ用のモードの時の、このボタンの字
 constexpr wchar_t kModelModeTextEn[] = L"To model";   // 英語モードでの同じ字（11-11 に MMD 9.32 で読んだ）
+// MMDZh 等运行时汉化插件把该按钮翻成「模型编辑」/「相机编辑」。认中文，camera_mode() 才不会误判。
+constexpr wchar_t kModelModeTextZh[] = L"模型编辑";
+constexpr wchar_t kCameraModeTextZh[] = L"相机编辑";
 // 下の段のパネルの上端は、各パネルの見出しの「－」ボタン（14×14）の 2px 上（11-04 カメラ用のモードで 834 → 832、下端は 986）。
 // 前は「カメラ編」の下端＋26px で決めていたが、カメラ用のモードではカメラ編が 3D 画面の下（606）に上がるので、
 // パネルが 170px 上から始まって窓の下まで伸びていた（11-04 マスター「クソデカサイズ」）
@@ -96,6 +99,7 @@ bool mmd_english_mode(HWND mmd) {
     wchar_t text[16]{};
     const HWND toggle = GetDlgItem(mmd, kCameraButton);
     if (!toggle || !GetWindowTextW(toggle, text, 16)) return false;
+    // 中文（MMDZh 汉化后）不属于英语模式，返回 false 让面板走中文分支。
     return wcscmp(text, L"camera") == 0 || wcscmp(text, L"To camera") == 0 || wcscmp(text, kModelModeTextEn) == 0;
 }
 
@@ -141,13 +145,14 @@ bool NakawariPanel::create(HWND mmd, std::function<void(int)> on_command, std::w
     // ボタンは MMD のボタン（再生・登録など。ＭＳ Ｐゴシック 12）と同じ字にする（11-05 マスター）。字体は MMD のを借りる（消さない）
     // 字は MMD のモードで選ぶ。Python の窓がつながると、窓の言葉で書き直す（mmd_ainakawari/panel.py の LABELS）
     const bool en = mmd_english_mode(mmd_);
-    for (const auto& b : {std::make_pair(en ? L"Samples ▼" : L"サンプルから選ぶ ▼", kSamples),
+    // 中文版：默认字直接写中文，Python 窗口连上后会用 zh 翻译表再覆盖一次（panel.py / app._sync_panel）。
+    for (const auto& b : {std::make_pair(en ? L"Samples ▼" : L"示例 ▼", kSamples),
                           std::make_pair(en ? L"Generate" : L"生　成", kGenerate),
-                          std::make_pair(en ? L"Undo" : L"元に戻す", kUndo), std::make_pair(en ? L"Details" : L"詳　細", kDetails)}) {
+                          std::make_pair(en ? L"Undo" : L"撤销", kUndo), std::make_pair(en ? L"Details" : L"详　细", kDetails)}) {
         const HWND button = add(L"BUTTON", b.first, BS_PUSHBUTTON | WS_TABSTOP, b.second);
         if (mmd_font) SendMessageW(button, WM_SETFONT, reinterpret_cast<WPARAM>(mmd_font), FALSE);
     }
-    add(L"STATIC", en ? L"Starting AI Nakawari..." : L"AIナカワリ を起動中…", SS_OWNERDRAW, kStatus);
+    add(L"STATIC", en ? L"Starting AI Nakawari..." : L"AI中割 正在启动…", SS_OWNERDRAW, kStatus);
     SetTimer(panel_, kLayoutTimer, 500, nullptr);
     request_layout();
     return true;
@@ -210,7 +215,7 @@ void NakawariPanel::show_samples() {
         AppendMenuW(group ? group : menu, MF_STRING, kFirstSample + prompts.size() - 1, en ? prompts.back().c_str() : line.c_str());
     }
     if (prompts.empty()) {
-        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, ((en ? L"Cannot read the sample list: " : L"サンプルの一覧が読めません: ") + samples_).c_str());
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, ((en ? L"Cannot read the sample list: " : L"无法读取示例列表：") + samples_).c_str());
     }
     RECT r;
     GetWindowRect(GetDlgItem(panel_, kSamples), &r);
@@ -263,7 +268,9 @@ bool NakawariPanel::filter(MSG* message) {
 bool NakawariPanel::camera_mode() const {
     wchar_t text[16]{};
     const HWND toggle = GetDlgItem(mmd_, kCameraButton);
-    return toggle && GetWindowTextW(toggle, text, 16) && (wcscmp(text, kModelModeText) == 0 || wcscmp(text, kModelModeTextEn) == 0);
+    if (!toggle || !GetWindowTextW(toggle, text, 16)) return false;
+    // MMDZh 把「モデル編」翻成「模型编辑」；含义一致，照旧判为相机模式。
+    return wcscmp(text, kModelModeText) == 0 || wcscmp(text, kModelModeTextEn) == 0 || wcscmp(text, kModelModeTextZh) == 0;
 }
 
 // 下の段の一番右のパネルの右に、隣のパネルと上端・下端をそろえて置く。
@@ -294,11 +301,17 @@ void NakawariPanel::layout() {
     }
     const RECT want{x, y, x + kWidth, bottom};
     if (!EqualRect(&want, &placed_) || !IsWindowVisible(panel_)) {
+        // SWP_NOCOPYBITS: 移動後に古い絵を写さず、全部描き直させる（MMD が下の段を並べ直して
+        // パネルが動く時、古い絵の写りが黒い塊になって残ることがあった）
         SetWindowPos(panel_, HWND_TOP, want.left, want.top, want.right - want.left, want.bottom - want.top,
-                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
         placed_ = want;
         arrange(want.right - want.left, want.bottom - want.top);
     }
+    // MMD が自分の画面を描き直すと（工程を開き直す時など）、パネルの上から描いて黒い塊に
+    // なることがある（マウスを乗せると直る＝パネルが描き直されていないだけ。11-13 報告）。
+    // 0.5 秒ごとのタイマーで、見えている間は常に描き直させる（描くのは 240px 幅の小さい物なので軽い）
+    RedrawWindow(panel_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
 // 部品を三行に並べる: 1 行目にモード選択と「選んだキー」、2 行目にプロンプト、3 行目にボタン、下に状態の 1 行。
@@ -323,7 +336,6 @@ void NakawariPanel::arrange(int width, int height) {
     place(kStatus, pad, std::min(top + 102, height - 18), inner, 14);
     RedrawWindow(panel_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);   // 子の部品まで描き直す
 }
-
 COLORREF NakawariPanel::color_at(int y) const {
     RECT r;
     GetClientRect(panel_, &r);

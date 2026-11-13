@@ -69,16 +69,16 @@ def hosts_in(folder):
 
 def ask_host(folder, ask=input):
     """MMD と MMM が同じフォルダにある時に、どちらに入れるかを聞く。"""
-    print(f"{folder} には MikuMikuDance.exe と {MMM_EXE} の両方があります。どちらに AIナカワリ を入れますか？")
+    print(f"{folder} 里同时有 MikuMikuDance.exe 和 {MMM_EXE}，要把 AI中割 装到哪一个？")
     while True:
-        answer = ask("  1: MMD（MikuMikuDance）   2: MMM（MikuMikuMoving）   番号を入れて Enter > ").strip()
+        answer = ask("  1: MMD（MikuMikuDance）   2: MMM（MikuMikuMoving）   输入序号后回车 > ").strip()
         if answer in ("1", "１"):
             return "mmd"
         if answer in ("2", "２"):
             return "mmm"
         if not answer:
-            raise Stop("選ばれなかったので、何もせずに終わります。")
-        print("1 か 2 を入れてください。")
+            raise Stop("未选择，什么都不做，直接结束。")
+        print("请输入 1 或 2。")
 
 
 def choose_target(start):
@@ -86,37 +86,42 @@ def choose_target(start):
     kinds = hosts_in(start)
     if kinds:
         return start, kinds[0] if len(kinds) == 1 else ask_host(start)
-    print("この zip は MMD・MMM のフォルダの外に展開されています。")
-    print(f"MikuMikuDance.exe か {MMM_EXE} のあるフォルダを選んでください（選んだフォルダに AIナカワリ を写します）。")
+    print("这个 zip 解压到了 MMD / MMM 文件夹之外。")
+    print(f"请选择含 MikuMikuDance.exe 或 {MMM_EXE} 的文件夹（AI中割 会被复制到所选文件夹）。")
     import tkinter as tk
     from tkinter import filedialog
     root = tk.Tk()
     root.withdraw()
     try:
         while True:
-            folder = filedialog.askdirectory(title=f"MikuMikuDance.exe か {MMM_EXE} のあるフォルダを選んでください", mustexist=True)
+            folder = filedialog.askdirectory(title=f"请选择含 MikuMikuDance.exe 或 {MMM_EXE} 的文件夹", mustexist=True)
             if not folder:
-                raise Stop("フォルダが選ばれなかったので、何もせずに終わります。")
+                raise Stop("未选择文件夹，什么都不做，直接结束。")
             folder = os.path.normpath(folder)
             kinds = hosts_in(folder)
             if kinds:
                 return folder, kinds[0] if len(kinds) == 1 else ask_host(folder)
-            print(f"{folder} に MikuMikuDance.exe も {MMM_EXE} もありません。選び直してください。")
+            print(f"{folder} 里既没有 MikuMikuDance.exe 也没有 {MMM_EXE}，请重新选择。")
     finally:
         root.destroy()
 
 
 def check_version(mmd):
+    """校验 MikuMikuDance.exe 的哈希。
+
+    中文版说明：MMDZh 是运行时汉化插件（不改 exe 文件），所以这里仍应通过。
+    若不过，说明 exe 本体被改过（不是 MMDZh 这种插件式汉化），内存偏移会失效，必须停止。
+    """
     from mmd_mcp.bone_state import VERIFIED_SHA256
     if sha256(os.path.join(mmd, EXE)) != VERIFIED_SHA256:
-        raise Stop("AIナカワリ が使えるのは MikuMikuDance 9.32 x64（日本語版）だけです。\n"
-                   "この MikuMikuDance.exe は別の版なので、ファイルは何も変えずに終わります。")
+        raise Stop("AI中割 需要原版 MikuMikuDance 9.32 x64 的 exe 文件（运行时汉化插件如 MMDZh 不改 exe，可以通过）。\n"
+                   "这个 MikuMikuDance.exe 的哈希不符，文件未做任何改动，安装结束。")
 
 
 def check_mmm_version(mmm):
     if sha256(os.path.join(mmm, MMM_EXE)) != MMM_SHA256:
-        raise Stop("AIナカワリ の MMM 版が使えるのは MikuMikuMoving 1.2.9.2（64bit）だけです。\n"
-                   f"この {MMM_EXE} は別の版なので、ファイルは何も変えずに終わります。")
+        raise Stop("AI中割 的 MMM 版只支持 MikuMikuMoving 1.2.9.2（64bit）。\n"
+                   f"这个 {MMM_EXE} 是别的版本，文件未做任何改动，安装结束。")
 
 
 def check_not_running(folder, exe_name=EXE, label="MMD"):

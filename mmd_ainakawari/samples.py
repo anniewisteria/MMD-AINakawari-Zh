@@ -29,6 +29,9 @@ def load(path=PATH):
 
 
 def group_name(name, lang):
-    """種類の名前 [日本語|English] の、lang（"ja"・"en"）の方。| が無ければそのまま。"""
+    """種類の名前 [日本語|English] の、lang（"ja"・"en"・"zh"）の方。| が無ければそのまま。
+
+    中文版：prompt_samples.txt 的第一段已直接写成中文分组名，zh 时原样返回即可。
+    """
     ja, sep, en = name.partition("|")
     return en.strip() if sep and lang == "en" else ja.strip()

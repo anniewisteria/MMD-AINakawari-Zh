@@ -9,11 +9,11 @@ from mmd_mcp import scene_controls as scene
 from mmd_mcp import timeline
 from mmd_mcp.bone_controls import get_selected_bone_transform
 from mmd_mcp.bone_selection import select_bone
-from mmd_mcp.ui_language import english_mode
+from mmd_mcp import ui_language as _ui_language
 from mmd_mcp.ui_state import UIReader, get_ui_state
 from mmd_mcp.windows import list_windows
 
-from . import mmd_memory, vmd
+from . import mmd_memory, vmd, zh_compat
 from .i18n import _
 
 # MMD の中のモデルのデータでの、読み込んだファイルの場所（UTF-16・256 文字）。
@@ -286,16 +286,40 @@ class MMDLink:
         return {**r, "delete_sent": True}
 
     def english(self):
-        """MMD が英語モード（ヘルプ → English Mode）か。mmd-mcp の english_mode（カメラ編／モデル編のボタンの文字で見る）。"""
-        return english_mode(UIReader(self.hwnd))
+        """MMD が英語モードか。中文版：MMDZh 汉化后按钮是「模型编辑/相机编辑」，
+        zh_compat 已把 english_mode 换成中文感知版（中文一律按非英语处理，认不出也不抛异常）。
+        用模块属性动态取，避免绑定到补丁前的旧函数。"""
+        try:
+            return _ui_language.english_mode(UIReader(self.hwnd))
+        except Exception:
+            return False
 
     def language(self):
-        """窓に出す言葉（i18n.py）。MMD が英語モードなら "en"。"""
-        return "en" if self.english() else "ja"
+        """窓に出す言葉（i18n.py）。中文版固定 "zh"。
+
+        注意：界面语言与「按什么文字找 MMD 控件」是两件事。这里返回 zh 让窗口/日志出中文；
+        english() 仍返回 False，配合 zh_compat 注入的中文变体去命中控件。
+        """
+        return "zh"
 
     def _track(self, track):
-        """範囲選択の対象の日本語の名前を、今の MMD の言葉の名前にする（英語モードでは「全ボーンﾌﾚｰﾑ」が無く、キーを消せなかった）。"""
-        return TRACKS_EN[track] if self.english() else track
+        """範囲選択の対象の日本語の名前を、今の MMD の言葉の名前にする。
+
+        中文版改为「读取组合框 434 里实际存在的项」：日文原版是「全ﾌﾚｰﾑ」等，
+        英语模式是 All frame 等，MMDZh 汉化后是「全部帧 / 全部骨骼帧 / 全部表情帧」。
+        这样同一个插件在三种 MMD 上都能用，不依赖「当前是不是中文」的判断。
+        """
+        candidates = [track, TRACKS_EN.get(track), zh_compat.TRACKS_ZH.get(track)]
+        try:
+            items = UIReader(self.hwnd).combo(434)
+            if items and items.get("items"):
+                for name in candidates:
+                    if name and items["items"].count(name) == 1:
+                        return name
+        except Exception:
+            pass
+        # 读不到组合框时按 MMD 模式猜（补丁前的兜底）
+        return TRACKS_EN[track] if self.english() else zh_compat.TRACKS_ZH.get(track, track)
 
     def _settle(self, result, stage, verify):
         """mmd-mcp の返事が MMD の窓で止まっていたら、その窓をログに残し、ボタン 1 つのお知らせの窓だけ閉じる。
@@ -464,13 +488,16 @@ class MMDLink:
             """その窓が「〜用のモーションデータです 続行しますか？」なら (OK のボタン, 文)。違えば None。"""
             # 英語モード（11-11 に MMD 9.32 で出して読んだ）: 「load motion data」
             # 「This motion file is the data for '○○'. / You can regist the motion only same bone name. / Are you OK?」
-            if d.get("title") not in ("モーションデータ読込", "load motion data"):   # i18n: skip
+            if d.get("title") not in zh_compat.TITLE_LOAD_MOTION_ZH:   # i18n: skip
                 return None
             controls = d.get("controls") or []
             texts = [c.get("text") or "" for c in controls if c.get("class") == "Static"]
             ok = [c for c in controls if c.get("class") == "Button" and c.get("id") == 1]
-            if len(ok) != 1 or not any(("用のモーションデータです" in t and "続行しますか" in t)   # i18n: skip
-                                       or ("This motion file is the data for" in t and "Are you OK?" in t) for t in texts):
+            # 中文版（MMDZh 把整句翻成「此文件是供 ○○ 使用的动作数据…要继续吗？」）
+            zh_ok = any(any(word in t for word in zh_compat.ACCEPT_OTHER_MODEL_ZH) for t in texts)
+            if len(ok) != 1 or not (zh_ok
+                                    or any(("用のモーションデータです" in t and "続行しますか" in t)   # i18n: skip
+                                           or ("This motion file is the data for" in t and "Are you OK?" in t) for t in texts)):
                 return None
             return ok[0]["hwnd"], texts
 
